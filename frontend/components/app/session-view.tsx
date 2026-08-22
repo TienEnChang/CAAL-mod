@@ -1,8 +1,12 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { useSessionContext, useSessionMessages } from '@livekit/components-react';
+import {
+  useSessionContext,
+  useSessionMessages,
+  useTranscriptions,
+} from '@livekit/components-react';
 import { Brain } from '@phosphor-icons/react/dist/ssr';
 import type { AppConfig } from '@/app-config';
 import { ChatTranscript } from '@/components/app/chat-transcript';
@@ -12,6 +16,8 @@ import {
   AgentControlBar,
   type ControlBarControls,
 } from '@/components/livekit/agent-control-bar/agent-control-bar';
+import { useConversations } from '@/hooks/useConversations';
+import { useToolActivities } from '@/hooks/useToolStatus';
 import { cn } from '@/lib/utils';
 import { ScrollArea } from '../livekit/scroll-area/scroll-area';
 
@@ -69,8 +75,24 @@ export const SessionView = ({
 }: React.ComponentProps<'section'> & SessionViewProps) => {
   const session = useSessionContext();
   const { messages } = useSessionMessages(session);
+  const transcriptions = useTranscriptions({ room: session.room });
+  const { messages: historyMessages } = useConversations();
+  const toolActivities = useToolActivities();
   const [chatOpen, setChatOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const partialIds = useMemo(
+    () =>
+      new Set(
+        transcriptions
+          .filter(
+            (item) =>
+              item.participantInfo.identity === session.room.localParticipant.identity &&
+              item.streamInfo.attributes?.['lk.transcription_final'] !== 'true'
+          )
+          .map((item) => item.streamInfo.id)
+      ),
+    [session.room.localParticipant.identity, transcriptions]
+  );
 
   const controls: ControlBarControls = {
     leave: true,
@@ -87,13 +109,19 @@ export const SessionView = ({
     if (scrollAreaRef.current && lastMessageIsLocal) {
       scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, historyMessages, toolActivities]);
+
+  useEffect(() => {
+    if (historyMessages.length > 0 || partialIds.size > 0 || toolActivities.length > 0) {
+      setChatOpen(true);
+    }
+  }, [historyMessages.length, partialIds, toolActivities.length]);
 
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
       {/* Top right buttons */}
       {onOpenMemory && (
-        <div className="fixed top-6 right-6 z-40">
+        <div className="absolute top-6 right-6 z-40">
           <button
             onClick={onOpenMemory}
             className="text-muted-foreground hover:text-foreground hover:bg-muted rounded-full p-2 transition-colors"
@@ -106,7 +134,7 @@ export const SessionView = ({
       {/* Chat Transcript */}
       <div
         className={cn(
-          'fixed inset-0 grid grid-cols-1 grid-rows-1',
+          'absolute inset-0 grid grid-cols-1 grid-rows-1',
           !chatOpen && 'pointer-events-none'
         )}
       >
@@ -115,6 +143,9 @@ export const SessionView = ({
           <ChatTranscript
             hidden={!chatOpen}
             messages={messages}
+            historyMessages={historyMessages}
+            partialIds={partialIds}
+            toolActivities={toolActivities}
             className="mx-auto max-w-2xl space-y-3 transition-opacity duration-300 ease-out"
           />
         </ScrollArea>
@@ -126,7 +157,7 @@ export const SessionView = ({
       {/* Bottom */}
       <MotionBottom
         {...BOTTOM_VIEW_MOTION_PROPS}
-        className="fixed inset-x-3 bottom-0 z-50 md:inset-x-12"
+        className="absolute inset-x-3 bottom-0 z-50 md:inset-x-12"
       >
         {appConfig.isPreConnectBufferEnabled && (
           <PreConnectMessage messages={messages} className="pb-4" />

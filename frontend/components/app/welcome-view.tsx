@@ -40,9 +40,9 @@ export const WelcomeView = ({
   const tCommon = useTranslations('Common');
 
   return (
-    <div ref={ref} className="relative min-h-screen" style={{ background: 'var(--surface-deep)' }}>
+    <div ref={ref} className="relative h-full" style={{ background: 'var(--surface-deep)' }}>
       {/* Top right buttons */}
-      <div className="fixed top-6 right-6 z-40 flex items-center gap-2">
+      <div className="absolute top-6 right-6 z-40 flex items-center gap-2">
         {onOpenMemory && (
           <button
             onClick={onOpenMemory}
@@ -72,7 +72,7 @@ export const WelcomeView = ({
         )}
       </div>
 
-      <section className="flex min-h-screen flex-col items-center justify-center text-center">
+      <section className="flex h-full flex-col items-center justify-center text-center">
         <WelcomeImage />
 
         <p className="text-foreground max-w-prose pt-1 leading-6 font-medium">{t('subtitle')}</p>

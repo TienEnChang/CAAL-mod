@@ -380,8 +380,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
     tool_calls_log: list[ToolCallInfo] = []
 
     async def _capture_tool_status(
-        used: bool, names: list[str], params: list[dict]
+        used: bool,
+        names: list[str],
+        params: list[dict],
+        status: str = "running",
     ) -> None:
+        del status
         if used:
             tool_calls_log.clear()  # Replace — callback accumulates across rounds
             for name, param in zip(names, params):

@@ -30,6 +30,7 @@ import os
 import random
 import sys
 import time
+import uuid
 
 import requests
 
@@ -43,11 +44,12 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_script_dir, ".env"))
 
 from livekit import agents, rtc  # noqa: E402
-from livekit.agents import Agent, AgentSession, mcp  # noqa: E402
+from livekit.agents import Agent, AgentSession, llm, mcp  # noqa: E402
 from livekit.plugins import groq as groq_plugin  # noqa: E402
 from livekit.plugins import openai, silero  # noqa: E402
 
 from caal import CAALLLM  # noqa: E402
+from caal.conversations import ConversationStore  # noqa: E402
 from caal.integrations import (  # noqa: E402
     MemoryTools,
     WebSearchTools,
@@ -59,7 +61,7 @@ from caal.integrations import (  # noqa: E402
 )
 from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
-from caal.stt import WakeWordGatedSTT  # noqa: E402
+from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
 
 # Configure logging - LiveKit adds LogQueueHandler to root in worker processes,
@@ -219,10 +221,12 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         hass_tool_definitions: list[dict] | None = None,
         hass_tool_callables: dict | None = None,
         short_term_memory: ShortTermMemory | None = None,
+        chat_ctx: llm.ChatContext | None = None,
     ) -> None:
         super().__init__(
             instructions=load_prompt(language=language),
             llm=caal_llm,  # Satisfies LLM interface requirement
+            chat_ctx=chat_ctx,
         )
 
         # Store provider for llm_node access
@@ -408,6 +412,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # Load wake word settings
     all_settings = settings_module.load_settings()
     wake_word_enabled = all_settings.get("wake_word_enabled", False)
+    session_vad = silero.VAD.load()
 
     # Session reference for wake word callback (set after session creation)
     _session_ref: AgentSession | None = None
@@ -477,7 +482,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             f"threshold={wake_word_threshold})"
         )
     else:
-        stt_instance = base_stt
+        if runtime["stt_provider"] == "speaches":
+            stt_instance = PreviewStreamAdapter(
+                inner_stt=base_stt,
+                vad_instance=session_vad,
+            )
+        else:
+            stt_instance = base_stt
         logger.info("  Wake word: disabled")
 
     # Create TTS instance based on provider
@@ -522,11 +533,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         stt=stt_instance,
         llm=caal_llm,
         tts=tts_instance,
-        vad=silero.VAD.load(),
+        vad=session_vad,
         allow_interruptions=runtime["allow_interruptions"],
         min_endpointing_delay=runtime["min_endpointing_delay"],
     )
     logger.info(f"  Session STT: {type(session.stt).__name__}")
+
+    # Snapshot the selected conversation for this agent job. Switching the
+    # active conversation reconnects the room, so a job never changes history
+    # underneath an in-flight response.
+    conversation_store = ConversationStore()
+    conversation_id = conversation_store.ensure_active()
+    chat_ctx = llm.ChatContext.empty()
+    for saved_message in conversation_store.context_messages(conversation_id):
+        chat_ctx.add_message(
+            role=saved_message["role"],
+            content=saved_message["content"],
+        )
 
     # Set session reference for wake word callback
     _session_ref = session
@@ -540,8 +563,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(ev) -> None:
         nonlocal _transcription_time
-        _transcription_time = time.perf_counter()
-        logger.debug(f"User said: {ev.transcript[:80]}...")
+        if ev.is_final:
+            _transcription_time = time.perf_counter()
+            logger.debug(f"User said: {ev.transcript[:80]}...")
+        else:
+            logger.debug(f"User partial: {ev.transcript[:80]}...")
 
     @session.on("agent_state_changed")
     def on_agent_state_changed(ev) -> None:
@@ -555,17 +581,28 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if isinstance(stt_instance, WakeWordGatedSTT):
             stt_instance.set_agent_busy(ev.new_state in ("thinking", "speaking"))
 
+    _tool_activity_id: str | None = None
+
     async def _publish_tool_status(
         tool_used: bool,
         tool_names: list[str],
         tool_params: list[dict],
+        status: str = "running",
     ) -> None:
         """Publish tool usage status to frontend via data packet."""
         import json
+        nonlocal _tool_activity_id
+
+        if tool_used and status == "running" and _tool_activity_id is None:
+            _tool_activity_id = f"tool_{uuid.uuid4().hex}"
+        activity_id = _tool_activity_id
         payload = json.dumps({
+            "id": activity_id,
             "tool_used": tool_used,
             "tool_names": tool_names,
             "tool_params": tool_params,
+            "status": status if tool_used else "idle",
+            "timestamp": time.time() * 1000,
         })
 
         try:
@@ -575,6 +612,24 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 topic="tool_status",
             )
             logger.debug(f"Published tool status: used={tool_used}, names={tool_names}")
+            if tool_used and status in {"complete", "failed"} and activity_id:
+                display_names = ", ".join(name.replace("_", " ") for name in tool_names)
+                conversation_store.append_message(
+                    conversation_id,
+                    role="tool",
+                    content=(
+                        f"Used {display_names}"
+                        if status == "complete"
+                        else f"Failed to use {display_names}"
+                    ),
+                    message_id=activity_id,
+                    metadata={
+                        "tool_names": tool_names,
+                        "tool_params": tool_params,
+                        "status": status,
+                    },
+                )
+                _tool_activity_id = None
         except Exception as e:
             logger.warning(f"Failed to publish tool status: {e}")
 
@@ -616,7 +671,44 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         hass_tool_definitions=hass_tool_definitions,
         hass_tool_callables=hass_tool_callables,
         short_term_memory=short_term_memory,
+        chat_ctx=chat_ctx,
     )
+
+    async def _publish_conversation_updated() -> None:
+        import json
+
+        try:
+            await ctx.room.local_participant.publish_data(
+                json.dumps({"conversation_id": conversation_id}).encode("utf-8"),
+                reliable=True,
+                topic="conversation_updated",
+            )
+        except Exception as e:
+            logger.debug(f"Failed to publish conversation update: {e}")
+
+    @session.on("conversation_item_added")
+    def on_conversation_item_added(ev) -> None:
+        item = ev.item
+        if not isinstance(item, llm.ChatMessage) or item.role not in {"user", "assistant"}:
+            return
+        text = item.text_content
+        if not text:
+            return
+        try:
+            conversation_store.append_message(
+                conversation_id,
+                role=item.role,
+                content=text,
+                message_id=item.id,
+                # Assistant items are created before tool execution begins. Save
+                # them when finalized so restored history keeps tool rows between
+                # the user's request and the assistant's answer.
+                created_at=item.created_at if item.role == "user" else time.time(),
+                metadata={"interrupted": item.interrupted},
+            )
+            asyncio.create_task(_publish_conversation_updated())
+        except Exception as e:
+            logger.warning(f"Failed to persist conversation item: {e}")
 
     # Create event to wait for session close (BEFORE session.start to avoid race condition)
     close_event = asyncio.Event()
@@ -696,7 +788,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     # Say a canned greeting using agent name — avoids LLM call that could trigger tools
     agent_name = settings_module.get_setting("agent_name", "Cal")
-    await session.say(f"Hello! I'm {agent_name}, your voice assistant. How can I help you?")
+    await session.say(
+        f"Hello! I'm {agent_name}, your voice assistant. How can I help you?",
+        add_to_chat_ctx=False,
+    )
 
     logger.info("Agent ready - listening for speech...")
 

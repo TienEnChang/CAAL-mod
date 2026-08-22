@@ -7,11 +7,13 @@ import type { AppConfig } from '@/app-config';
 import { AgentAudioRenderer } from '@/components/app/agent-audio-renderer';
 import { ViewController } from '@/components/app/view-controller';
 import { WakeWordProvider } from '@/components/app/wake-word-provider';
+import { ConversationLayout } from '@/components/conversations/conversation-sidebar';
 import { Toaster } from '@/components/livekit/toaster';
 import { LanguageSelector, SetupWizard } from '@/components/setup';
 import { useCaalTheme } from '@/hooks/useCaalTheme';
 // import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useConnectionErrors } from '@/hooks/useConnectionErrors';
+import { ConversationProvider } from '@/hooks/useConversations';
 import { useDebugMode } from '@/hooks/useDebug';
 import { getSandboxTokenSource } from '@/lib/utils';
 
@@ -167,9 +169,13 @@ export function App({ appConfig }: AppProps) {
         defaultEnabled={false}
       >
         <AppSetup />
-        <main className="grid h-svh grid-cols-1 place-content-center">
-          <ViewController appConfig={appConfig} />
-        </main>
+        <ConversationProvider>
+          <ConversationLayout>
+            <main className="h-full">
+              <ViewController appConfig={appConfig} />
+            </main>
+          </ConversationLayout>
+        </ConversationProvider>
         <StartAudio label="Start Audio" />
         <AgentAudioRenderer />
         <Toaster />

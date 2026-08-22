@@ -194,21 +194,36 @@ async def llm_node(
                 all_tool_params.extend(tc.arguments for tc in response.tool_calls)
 
                 if hasattr(agent, "_on_tool_status") and agent._on_tool_status:
-                    import asyncio
-
-                    asyncio.create_task(
-                        agent._on_tool_status(True, all_tool_names, all_tool_params)
+                    await agent._on_tool_status(
+                        True, all_tool_names, all_tool_params, status="running"
                     )
 
-                messages = await _execute_tool_calls(
-                    agent,
-                    messages,
-                    response.tool_calls,
-                    response.content,
-                    provider=provider,
-                    tool_data_cache=tool_data_cache,
-                    short_term_memory=short_term_memory,
-                )
+                try:
+                    messages = await _execute_tool_calls(
+                        agent,
+                        messages,
+                        response.tool_calls,
+                        response.content,
+                        provider=provider,
+                        tool_data_cache=tool_data_cache,
+                        short_term_memory=short_term_memory,
+                    )
+                except Exception:
+                    if hasattr(agent, "_on_tool_status") and agent._on_tool_status:
+                        await agent._on_tool_status(
+                            True,
+                            all_tool_names,
+                            all_tool_params,
+                            status="failed",
+                        )
+                    raise
+                if hasattr(agent, "_on_tool_status") and agent._on_tool_status:
+                    await agent._on_tool_status(
+                        True,
+                        all_tool_names,
+                        all_tool_params,
+                        status="complete",
+                    )
                 # Loop back — model sees tool results and decides: chain or respond
 
             if tool_round >= max_tool_rounds:

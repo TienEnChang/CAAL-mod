@@ -5,10 +5,15 @@ import { RoomEvent } from 'livekit-client';
 import { useRoomContext } from '@livekit/components-react';
 
 export interface ToolStatus {
+  id: string | null;
   toolUsed: boolean;
   toolNames: string[];
   toolParams: Record<string, unknown>[];
+  status: 'idle' | 'running' | 'complete' | 'failed';
+  timestamp: number;
 }
+
+export type ToolActivity = ToolStatus & { id: string };
 
 /**
  * Hook to track tool usage status from the agent.
@@ -35,9 +40,12 @@ export function useToolStatus() {
         const data = JSON.parse(decoder.decode(payload));
 
         setToolStatus({
+          id: data.id ?? null,
           toolUsed: data.tool_used ?? false,
           toolNames: data.tool_names ?? [],
           toolParams: data.tool_params ?? [],
+          status: data.status ?? (data.tool_used ? 'running' : 'idle'),
+          timestamp: data.timestamp ?? Date.now(),
         });
       } catch (error) {
         console.error('[useToolStatus] Failed to parse tool status:', error);
@@ -52,4 +60,49 @@ export function useToolStatus() {
   }, [room]);
 
   return toolStatus;
+}
+
+/** Ordered tool activity rows for the transcript timeline. */
+export function useToolActivities() {
+  const room = useRoomContext();
+  const [activities, setActivities] = useState<ToolActivity[]>([]);
+
+  useEffect(() => {
+    if (!room) return;
+    const handleDataReceived = (
+      payload: Uint8Array,
+      _participant: unknown,
+      _kind: unknown,
+      topic?: string
+    ) => {
+      if (topic !== 'tool_status') return;
+      try {
+        const data = JSON.parse(new TextDecoder().decode(payload));
+        if (!data.tool_used || !data.id) return;
+        const activity: ToolActivity = {
+          id: data.id,
+          toolUsed: true,
+          toolNames: data.tool_names ?? [],
+          toolParams: data.tool_params ?? [],
+          status: data.status ?? 'running',
+          timestamp: data.timestamp ?? Date.now(),
+        };
+        setActivities((current) => {
+          const index = current.findIndex((item) => item.id === activity.id);
+          if (index < 0) return [...current, activity];
+          const next = [...current];
+          next[index] = { ...current[index], ...activity };
+          return next;
+        });
+      } catch (error) {
+        console.error('[useToolActivities] Failed to parse tool status:', error);
+      }
+    };
+    room.on(RoomEvent.DataReceived, handleDataReceived);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleDataReceived);
+    };
+  }, [room]);
+
+  return activities;
 }

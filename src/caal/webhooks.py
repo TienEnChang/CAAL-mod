@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import lru_cache
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -48,6 +49,7 @@ from pydantic import BaseModel
 
 from . import registry_cache
 from . import settings as settings_module
+from .conversations import ConversationStore
 from .memory import ShortTermMemory
 from .settings import validate_url
 
@@ -161,6 +163,23 @@ class HealthResponse(BaseModel):
 
     status: str
     active_sessions: list[str]
+
+
+class ConversationCreateRequest(BaseModel):
+    """Create a new local conversation."""
+
+    title: str = "New conversation"
+
+
+class ConversationActivateRequest(BaseModel):
+    """Select the conversation used by the next agent session."""
+
+    active: bool = True
+
+
+@lru_cache(maxsize=1)
+def get_conversation_store() -> ConversationStore:
+    return ConversationStore()
 
 
 @app.post("/announce", response_model=AnnounceResponse)
@@ -339,6 +358,57 @@ async def health() -> HealthResponse:
         status="ok",
         active_sessions=rooms,
     )
+
+
+# =============================================================================
+# Conversation History Endpoints
+# =============================================================================
+
+
+@app.get("/conversations")
+async def list_conversations() -> dict:
+    """List conversations and identify the active one."""
+    return get_conversation_store().list()
+
+
+@app.post("/conversations")
+async def create_conversation(req: ConversationCreateRequest) -> dict[str, str]:
+    """Create and activate a conversation."""
+    conversation_id = get_conversation_store().create(req.title)
+    return {"id": conversation_id, "active_id": conversation_id}
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str) -> dict:
+    """Return a conversation and its ordered messages."""
+    try:
+        return get_conversation_store().detail(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+
+
+@app.patch("/conversations/{conversation_id}")
+async def activate_conversation(
+    conversation_id: str, req: ConversationActivateRequest
+) -> dict[str, str]:
+    """Activate a conversation for subsequent voice turns."""
+    if not req.active:
+        raise HTTPException(status_code=400, detail="Only activation is supported")
+    try:
+        get_conversation_store().activate(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    return {"active_id": conversation_id}
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str) -> dict[str, str]:
+    """Delete a conversation and select the newest remaining conversation."""
+    try:
+        active_id = get_conversation_store().delete(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    return {"active_id": active_id}
 
 
 # =============================================================================
