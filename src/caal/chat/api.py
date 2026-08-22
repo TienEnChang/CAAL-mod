@@ -215,8 +215,7 @@ async def _ensure_initialized() -> None:
         # Create LLM provider (same as voice path)
         _llm = CAALLLM.from_settings(runtime)
         logger.info(
-            f"  LLM: {runtime['llm_provider']} "
-            f"({runtime.get('ollama_model', '')})"
+            f"  LLM: {_llm.provider} ({_llm.model})"
         )
 
         # Load system prompt with date/time context

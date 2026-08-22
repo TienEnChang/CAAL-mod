@@ -512,6 +512,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             base_url=f"{KOKORO_URL}/v1",
             model=TTS_MODEL,
             voice=runtime["tts_voice_kokoro"],
+            response_format="wav",
         )
 
     # Create session with STT and TTS (both OpenAI-compatible)
@@ -754,9 +755,23 @@ def preload_models():
         except Exception as e:
             logger.warning(f"  Failed to preload STT model: {e}")
 
-    # Warm up Ollama LLM (skip if using Groq cloud LLM)
+    # Warm up the selected LLM provider.
     if llm_provider == "groq":
         logger.info("  Skipping LLM preload (using Groq)")
+    elif llm_provider == "openai_compatible":
+        base_url = (
+            settings.get("openai_base_url")
+            or os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
+        ).rstrip("/")
+        try:
+            logger.info(f"  Checking OpenAI-compatible LLM: {base_url}")
+            response = requests.get(f"{base_url}/models", timeout=30)
+            if response.status_code == 200:
+                logger.info("  ✓ LLM ready")
+            else:
+                logger.warning(f"  LLM readiness check returned {response.status_code}")
+        except Exception as e:
+            logger.warning(f"  Failed to reach OpenAI-compatible LLM: {e}")
     else:
         ollama_host = settings.get("ollama_host") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         ollama_model = settings.get("ollama_model") or os.getenv("OLLAMA_MODEL", "ministral-3:8b")
@@ -787,6 +802,7 @@ def preload_models():
 # =============================================================================
 
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8889"))
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 
 
 def run_webhook_server_sync():
@@ -802,7 +818,7 @@ def run_webhook_server_sync():
 
     config = uvicorn.Config(
         app,
-        host="0.0.0.0",
+        host=WEBHOOK_HOST,
         port=WEBHOOK_PORT,
         log_level="warning",
         log_config=None,  # Don't configure logging (prevents duplicate handlers in forked workers)

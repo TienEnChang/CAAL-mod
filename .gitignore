@@ -47,6 +47,7 @@ TODO.md
 settings.json
 prompt/custom.md
 mcp_servers.json
+.native/
 
 # Database files
 *.db
