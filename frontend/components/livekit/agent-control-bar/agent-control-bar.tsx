@@ -29,6 +29,7 @@ export interface ControlBarControls {
 export interface AgentControlBarProps extends UseInputControlsProps {
   controls?: ControlBarControls;
   isConnected?: boolean;
+  transcriptOpen?: boolean;
   onChatOpenChange?: (open: boolean) => void;
   onDeviceError?: (error: { source: Track.Source; error: Error }) => void;
 }
@@ -41,6 +42,7 @@ export function AgentControlBar({
   saveUserChoices = true,
   className,
   isConnected = false,
+  transcriptOpen,
   onDisconnect,
   onDeviceError,
   onChatOpenChange,
@@ -50,6 +52,7 @@ export function AgentControlBar({
   const { send } = useChat();
   const participants = useRemoteParticipants();
   const [chatOpen, setChatOpen] = useState(false);
+  const effectiveChatOpen = transcriptOpen ?? chatOpen;
   const publishPermissions = usePublishPermissions();
   const {
     micTrackRef,
@@ -96,7 +99,7 @@ export function AgentControlBar({
       {/* Chat Input */}
       {visibleControls.chat && (
         <ChatInput
-          chatOpen={chatOpen}
+          chatOpen={effectiveChatOpen}
           isAgentAvailable={isAgentAvailable}
           onSend={handleSendMessage}
         />
@@ -158,7 +161,7 @@ export function AgentControlBar({
               size="icon"
               variant="secondary"
               aria-label={t('toggleTranscript')}
-              pressed={chatOpen}
+              pressed={effectiveChatOpen}
               onPressedChange={handleToggleTranscript}
             >
               <ChatTextIcon weight="bold" />

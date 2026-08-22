@@ -24,7 +24,6 @@ const CONTAINER_MOTION_PROPS = {
       transition: { delay: 0.2, duration: 0.3, staggerChildren: 0.1 },
     },
   },
-  initial: 'hidden',
   animate: 'visible',
   exit: 'hidden',
 };

@@ -92,7 +92,12 @@ export function TileLayout({ chatOpen }: TileLayoutProps) {
   const videoHeight = agentVideoTrack?.publication.dimensions?.height ?? 0;
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-8 bottom-32 z-50 md:top-12 md:bottom-40">
+    <div
+      className={cn(
+        'pointer-events-none absolute inset-x-0 bottom-32 z-50 md:bottom-40',
+        chatOpen ? 'top-20 md:top-24' : 'top-8 md:top-12'
+      )}
+    >
       <div className="relative mx-auto h-full max-w-2xl px-4 md:px-0">
         <div className={cn(classNames.grid)}>
           {/* Agent */}

@@ -4,13 +4,10 @@ import { forwardRef, useCallback, useRef } from 'react';
 import { useAutoScroll } from '@/components/livekit/scroll-area/hooks/useAutoScroll';
 import { cn } from '@/lib/utils';
 
-interface ScrollAreaProps {
-  children?: React.ReactNode;
-  className?: string;
-}
+type ScrollAreaProps = React.HTMLAttributes<HTMLDivElement>;
 
 export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function ScrollArea(
-  { className, children },
+  { className, children, ...props },
   ref
 ) {
   const scrollContentRef = useRef<HTMLDivElement>(null);
@@ -31,7 +28,7 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
   );
 
   return (
-    <div ref={mergedRef} className={cn('overflow-y-scroll scroll-smooth', className)}>
+    <div ref={mergedRef} className={cn('overflow-y-scroll scroll-smooth', className)} {...props}>
       <div>{children}</div>
     </div>
   );
