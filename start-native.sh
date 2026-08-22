@@ -23,11 +23,12 @@ LOG_DIR="$RUNTIME_DIR/logs"
 PID_DIR="$RUNTIME_DIR/pids"
 SUPERVISOR_DIR="$RUNTIME_DIR/supervisors"
 
-PROTOVOICE_DIR="${CAAL_PROTOVOICE_DIR:-$(dirname "$PROJECT_DIR")/protoVoice}"
-MODEL_PYTHON="${CAAL_MLX_PYTHON:-$PROTOVOICE_DIR/.venv/bin/python}"
+MLX_MODEL_VENV="$RUNTIME_DIR/mlx-model-venv"
+MODEL_PYTHON="${CAAL_MLX_PYTHON:-$MLX_MODEL_VENV/bin/python}"
 MLX_SPEECH_VENV="$RUNTIME_DIR/mlx-speech-venv"
 SPEECH_PYTHON="${CAAL_MLX_SPEECH_PYTHON:-$MLX_SPEECH_VENV/bin/python}"
 UV_BIN="${CAAL_UV_BIN:-$(command -v uv || true)}"
+UV_PYTHON="${CAAL_UV_PYTHON:-3.12}"
 AGENT_PYTHON="$PROJECT_DIR/.venv/bin/python"
 LIVEKIT_BIN="$BIN_DIR/livekit-server"
 NODE_BIN="${CAAL_NODE_BIN:-/Users/altspace/.local/node/bin/node}"
@@ -65,7 +66,9 @@ Commands:
 Port overrides:
   CAAL_QWEN_PORT              Qwen OpenAI-compatible API ($QWEN_PORT)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
+  CAAL_MLX_PYTHON             Existing Python environment with mlx-lm
   CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
+  CAAL_UV_PYTHON              Python version/interpreter used for native environments
   CAAL_LIVEKIT_PORT           LiveKit WebSocket/API ($LIVEKIT_PORT)
   CAAL_LIVEKIT_RTC_TCP_PORT   LiveKit RTC fallback TCP ($LIVEKIT_RTC_TCP_PORT)
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
@@ -246,7 +249,10 @@ status_supervisors() {
 validate_service_dependency() {
   local name="$1" executable
   case "$name" in
-    qwen) executable="$MODEL_PYTHON" ;;
+    qwen)
+      ensure_mlx_model_environment
+      executable="$MODEL_PYTHON"
+      ;;
     speech)
       ensure_mlx_speech_environment
       executable="$SPEECH_PYTHON"
@@ -265,6 +271,21 @@ validate_service_dependency() {
   fi
 }
 
+ensure_mlx_model_environment() {
+  if [[ -x "$MODEL_PYTHON" ]] && "$MODEL_PYTHON" -c \
+    'import mlx_lm' >/dev/null 2>&1; then
+    return 0
+  fi
+  [[ -n "$UV_BIN" && -x "$UV_BIN" ]] || {
+    echo "Missing uv; install it or set CAAL_MLX_PYTHON" >&2
+    return 1
+  }
+  echo "Creating dedicated MLX model environment..."
+  "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_MODEL_VENV"
+  "$UV_BIN" pip install --python "$MODEL_PYTHON" \
+    -r "$PROJECT_DIR/requirements-mlx-model.txt"
+}
+
 ensure_mlx_speech_environment() {
   if [[ -x "$SPEECH_PYTHON" ]] && "$SPEECH_PYTHON" -c \
     'import mlx_audio, mlx_whisper, soxr' >/dev/null 2>&1; then
@@ -274,12 +295,8 @@ ensure_mlx_speech_environment() {
     echo "Missing uv; install it or set CAAL_MLX_SPEECH_PYTHON" >&2
     return 1
   }
-  [[ -x "$MODEL_PYTHON" ]] || {
-    echo "Missing Python used to create the MLX speech environment: $MODEL_PYTHON" >&2
-    return 1
-  }
   echo "Creating dedicated MLX speech environment..."
-  "$UV_BIN" venv --python "$MODEL_PYTHON" "$MLX_SPEECH_VENV"
+  "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_SPEECH_VENV"
   "$UV_BIN" pip install --python "$SPEECH_PYTHON" \
     -r "$PROJECT_DIR/requirements-mlx-speech.txt"
 }
