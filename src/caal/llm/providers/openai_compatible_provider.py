@@ -7,8 +7,10 @@ Uses the openai Python library for async API calls.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI
@@ -129,7 +131,18 @@ class OpenAICompatibleProvider(LLMProvider):
                     )
                 )
 
-        return LLMResponse(content=message.content, tool_calls=tool_calls)
+        content = message.content
+        if not tool_calls and tools and content:
+            recovered_call = self.parse_text_tool_call(content, tools)
+            if recovered_call is not None:
+                logger.warning(
+                    "Recovered text-form tool call from OpenAI-compatible model: %s",
+                    recovered_call.name,
+                )
+                tool_calls.append(recovered_call)
+                content = None
+
+        return LLMResponse(content=content, tool_calls=tool_calls)
 
     async def chat_stream(
         self,
@@ -190,6 +203,55 @@ class OpenAICompatibleProvider(LLMProvider):
         if isinstance(arguments, dict):
             return arguments
         return {}
+
+    @staticmethod
+    def parse_text_tool_call(
+        content: str,
+        tools: list[dict[str, Any]],
+    ) -> ToolCall | None:
+        """Recover a Python-style call emitted as response text.
+
+        Some small local models occasionally emit ``(tool_name(key="value"))``
+        instead of populating the OpenAI ``tool_calls`` field. Only a complete
+        response naming a registered tool with literal keyword arguments is
+        accepted, so ordinary prose and executable expressions are ignored.
+        """
+        tool_names = {
+            function.get("name")
+            for tool in tools
+            if isinstance(tool, dict)
+            and isinstance((function := tool.get("function")), dict)
+            and isinstance(function.get("name"), str)
+        }
+
+        try:
+            expression = ast.parse(content.strip(), mode="eval").body
+        except (SyntaxError, ValueError):
+            return None
+
+        if (
+            not isinstance(expression, ast.Call)
+            or not isinstance(expression.func, ast.Name)
+            or expression.func.id not in tool_names
+            or expression.args
+            or any(keyword.arg is None for keyword in expression.keywords)
+        ):
+            return None
+
+        arguments: dict[str, Any] = {}
+        try:
+            for keyword in expression.keywords:
+                if keyword.arg in arguments:
+                    return None
+                arguments[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError, SyntaxError):
+            return None
+
+        return ToolCall(
+            id=f"recovered_{uuid.uuid4().hex}",
+            name=expression.func.id,
+            arguments=arguments,
+        )
 
     def format_tool_result(
         self,
