@@ -70,6 +70,32 @@ Open `https://YOUR_SERVER_IP:3443` and complete the setup wizard.
 | **Apple Silicon** | M1/M2/M3/M4 Mac | `./start-apple.sh` | [Apple Silicon Guide](docs/APPLE-SILICON.md) |
 | **Distributed** | GPU server + frontend | See guide | [Distributed Guide](docs/DISTRIBUTED-DEPLOYMENT.md) |
 
+### Fully native Apple Silicon (no Docker)
+
+After the native dependencies and frontend build are installed, run the complete
+stack with:
+
+```bash
+./start-native.sh
+```
+
+For faster development, keep the Metal-backed models loaded in one terminal and
+restart the app services independently in another:
+
+```bash
+# Terminal 1: Qwen, Whisper, and Kokoro
+./start-native.sh --models
+
+# Terminal 2: LiveKit, agent, and frontend
+./start-native.sh --app
+
+# Restart one changed service without reloading the models
+./start-native.sh --restart frontend
+```
+
+Use `./start-native.sh --help` for status, logs, stop commands, service names,
+and configurable port environment variables.
+
 ### HTTPS & Network
 
 HTTPS is enabled by default with auto-generated self-signed certificates. This is required because browsers block microphone access on non-`localhost` HTTP.

@@ -16,6 +16,7 @@ const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
 // External URL for browser connection (set to 'auto' for dynamic detection)
 const LIVEKIT_PUBLIC_URL = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+const LIVEKIT_PUBLIC_PORT = process.env.LIVEKIT_PUBLIC_PORT || '7880';
 
 // don't cache the results
 export const revalidate = 0;
@@ -64,7 +65,7 @@ export async function POST(req: Request) {
       // HTTP request - derive ws:// from request host for LAN/mobile access
       const host = req.headers.get('host') || 'localhost';
       const hostname = host.split(':')[0]; // Remove port if present
-      serverUrl = `ws://${hostname}:7880`;
+      serverUrl = `ws://${hostname}:${LIVEKIT_PUBLIC_PORT}`;
     }
 
     // Return connection details

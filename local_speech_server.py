@@ -177,4 +177,9 @@ async def speech(request: SpeechRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info")
+    uvicorn.run(
+        app,
+        host=os.getenv("SPEECH_HOST", "127.0.0.1"),
+        port=int(os.getenv("SPEECH_PORT", "8001")),
+        log_level="info",
+    )
