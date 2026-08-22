@@ -112,6 +112,7 @@ async def llm_node(
             tool_data_cache=tool_data_cache,
             short_term_memory=short_term_memory,
             max_turns=max_turns,
+            conversation_recall=getattr(agent, "_conversation_recall", None),
         )
 
         # Discover tools from agent and MCP servers
@@ -315,6 +316,7 @@ def _build_messages_from_context(
     tool_data_cache: ToolDataCache | None = None,
     short_term_memory: ShortTermMemory | None = None,
     max_turns: int = 20,
+    conversation_recall: str | None = None,
 ) -> list[dict]:
     """Build messages with sliding window and context injection.
 
@@ -332,6 +334,7 @@ def _build_messages_from_context(
         tool_data_cache: Cache of recent tool response data
         short_term_memory: Short-term memory for context awareness
         max_turns: Max conversation turns to keep (1 turn = user + assistant)
+        conversation_recall: Summary of older transcript turns, when truncated
     """
     system_prompt = None
     chat_messages = []
@@ -399,6 +402,9 @@ def _build_messages_from_context(
             memory_context = short_term_memory.get_context_message()
             if memory_context:
                 system_content += f"\n\n{memory_context}"
+
+        if conversation_recall:
+            system_content += f"\n\n{conversation_recall}"
 
         messages.append({"role": "system", "content": system_content})
 

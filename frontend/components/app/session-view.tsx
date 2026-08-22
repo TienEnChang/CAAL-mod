@@ -59,6 +59,20 @@ interface SessionViewProps {
   onOpenMemory?: () => void;
 }
 
+function IdleVoiceState({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="pointer-events-none absolute inset-x-6 top-[67px] bottom-32 flex items-center justify-center md:bottom-40">
+      <div className="text-muted-foreground flex max-w-sm flex-col items-center text-center">
+        <div className="border-border/60 bg-muted/20 mb-4 rounded-full border p-5">
+          <WaveformIcon className="text-foreground/80 h-12 w-12" weight="bold" />
+        </div>
+        <p className="text-foreground text-base font-medium">{title}</p>
+        <p className="mt-1.5 text-xs">{detail}</p>
+      </div>
+    </div>
+  );
+}
+
 export const SessionView = ({
   appConfig,
   onStartCall,
@@ -176,7 +190,7 @@ export const SessionView = ({
 
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
-      <header className="border-border/60 bg-background/90 absolute inset-x-0 top-0 z-[60] flex h-16 items-center border-b px-4 pl-16 backdrop-blur md:px-6">
+      <header className="border-border/60 bg-background/90 absolute inset-x-0 top-0 z-[60] flex h-[67px] items-center border-b px-4 pl-16 backdrop-blur md:px-6">
         <div className="min-w-0">
           <p className="text-foreground truncate text-sm font-medium">
             {activeConversation?.title ?? 'New conversation'}
@@ -255,15 +269,13 @@ export const SessionView = ({
         </ScrollArea>
 
         {chatOpen && !hasConversationContent && !conversationsLoading && (
-          <div className="pointer-events-none absolute inset-x-6 top-16 bottom-32 flex items-center justify-center md:bottom-40">
-            <div className="text-muted-foreground flex max-w-sm flex-col items-center text-center">
-              <WaveformIcon className="text-foreground/70 mb-3 h-9 w-9" weight="bold" />
-              <p className="text-foreground text-sm font-medium">{tWelcome('subtitle')}</p>
-              <p className="mt-1 text-xs">Your transcript will appear here.</p>
-            </div>
-          </div>
+          <IdleVoiceState title={tWelcome('subtitle')} detail="Transcript On" />
         )}
       </div>
+
+      {!chatOpen && !session.isConnected && (
+        <IdleVoiceState title={tWelcome('subtitle')} detail="Transcript Off" />
+      )}
 
       {session.isConnected && <TileLayout chatOpen={chatOpen} />}
 

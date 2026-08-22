@@ -25,6 +25,9 @@ SUPERVISOR_DIR="$RUNTIME_DIR/supervisors"
 
 PROTOVOICE_DIR="${CAAL_PROTOVOICE_DIR:-$(dirname "$PROJECT_DIR")/protoVoice}"
 MODEL_PYTHON="${CAAL_MLX_PYTHON:-$PROTOVOICE_DIR/.venv/bin/python}"
+MLX_SPEECH_VENV="$RUNTIME_DIR/mlx-speech-venv"
+SPEECH_PYTHON="${CAAL_MLX_SPEECH_PYTHON:-$MLX_SPEECH_VENV/bin/python}"
+UV_BIN="${CAAL_UV_BIN:-$(command -v uv || true)}"
 AGENT_PYTHON="$PROJECT_DIR/.venv/bin/python"
 LIVEKIT_BIN="$BIN_DIR/livekit-server"
 NODE_BIN="${CAAL_NODE_BIN:-/Users/altspace/.local/node/bin/node}"
@@ -62,6 +65,7 @@ Commands:
 Port overrides:
   CAAL_QWEN_PORT              Qwen OpenAI-compatible API ($QWEN_PORT)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
+  CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
   CAAL_LIVEKIT_PORT           LiveKit WebSocket/API ($LIVEKIT_PORT)
   CAAL_LIVEKIT_RTC_TCP_PORT   LiveKit RTC fallback TCP ($LIVEKIT_RTC_TCP_PORT)
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
@@ -243,7 +247,10 @@ validate_service_dependency() {
   local name="$1" executable
   case "$name" in
     qwen) executable="$MODEL_PYTHON" ;;
-    speech) executable="$MODEL_PYTHON" ;;
+    speech)
+      ensure_mlx_speech_environment
+      executable="$SPEECH_PYTHON"
+      ;;
     livekit) executable="$LIVEKIT_BIN" ;;
     agent) executable="$AGENT_PYTHON" ;;
     frontend) executable="$NODE_BIN" ;;
@@ -256,6 +263,25 @@ validate_service_dependency() {
     echo "Missing native frontend build: $NEXT_SERVER" >&2
     return 1
   fi
+}
+
+ensure_mlx_speech_environment() {
+  if [[ -x "$SPEECH_PYTHON" ]] && "$SPEECH_PYTHON" -c \
+    'import mlx_audio, mlx_whisper, soxr' >/dev/null 2>&1; then
+    return 0
+  fi
+  [[ -n "$UV_BIN" && -x "$UV_BIN" ]] || {
+    echo "Missing uv; install it or set CAAL_MLX_SPEECH_PYTHON" >&2
+    return 1
+  }
+  [[ -x "$MODEL_PYTHON" ]] || {
+    echo "Missing Python used to create the MLX speech environment: $MODEL_PYTHON" >&2
+    return 1
+  }
+  echo "Creating dedicated MLX speech environment..."
+  "$UV_BIN" venv --python "$MODEL_PYTHON" "$MLX_SPEECH_VENV"
+  "$UV_BIN" pip install --python "$SPEECH_PYTHON" \
+    -r "$PROJECT_DIR/requirements-mlx-speech.txt"
 }
 
 prepare_frontend() {
@@ -312,10 +338,10 @@ start_named() {
         --model "$QWEN_MODEL" --host 127.0.0.1 --port "$QWEN_PORT"
       ;;
     speech)
-      echo "Starting Whisper + Kokoro → http://127.0.0.1:$SPEECH_PORT"
+      echo "Starting MLX Whisper + MLX Kokoro → http://127.0.0.1:$SPEECH_PORT"
       start_service speech env \
         SPEECH_HOST="127.0.0.1" SPEECH_PORT="$SPEECH_PORT" \
-        "$MODEL_PYTHON" "$PROJECT_DIR/local_speech_server.py"
+        "$SPEECH_PYTHON" "$PROJECT_DIR/local_speech_server.py"
       ;;
     livekit)
       echo "Starting LiveKit → ws://127.0.0.1:$LIVEKIT_PORT"
@@ -344,7 +370,10 @@ start_named() {
   wait_http "$name"
   if [[ "$name" == "speech" ]]; then
     curl -fsS -X POST \
-      "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_KOKORO_MODEL:-hexgrad/Kokoro-82M}" \
+      "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-medium.en}" \
+      >/dev/null
+    curl -fsS -X POST \
+      "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_KOKORO_MODEL:-mlx-community/Kokoro-82M-bf16}" \
       >/dev/null
   fi
 }
@@ -431,10 +460,10 @@ export OPENAI_BASE_URL="http://127.0.0.1:$QWEN_PORT/v1"
 export OPENAI_MODEL="$QWEN_MODEL"
 export STT_PROVIDER="speaches"
 export SPEACHES_URL="http://127.0.0.1:$SPEECH_PORT"
-export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-distil-whisper/distil-medium.en}"
+export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-medium.en}"
 export TTS_PROVIDER="kokoro"
 export KOKORO_URL="http://127.0.0.1:$SPEECH_PORT"
-export TTS_MODEL="${CAAL_KOKORO_MODEL:-hexgrad/Kokoro-82M}"
+export TTS_MODEL="${CAAL_KOKORO_MODEL:-mlx-community/Kokoro-82M-bf16}"
 export TTS_VOICE="${CAAL_KOKORO_VOICE:-af_heart}"
 export TIMEZONE="${CAAL_TIMEZONE:-Asia/Taipei}"
 export TIMEZONE_DISPLAY="${CAAL_TIMEZONE_DISPLAY:-Taipei Time}"

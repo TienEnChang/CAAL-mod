@@ -7,8 +7,21 @@ import os
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+DEFAULT_REHYDRATE_MESSAGES = 40
+DEFAULT_REHYDRATE_MAX_CHARS = 6000
+
+
+@dataclass(frozen=True)
+class ContextWindow:
+    """The bounded transcript replayed to the model on reconnect."""
+
+    messages: list[dict[str, str]]
+    truncated: bool
+    oldest_rowid: int | None
 
 
 def _default_db_path() -> Path:
@@ -42,7 +55,9 @@ class ConversationStore:
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    summary TEXT,
+                    summary_through_rowid INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -64,6 +79,17 @@ class ConversationStore:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(conversations)")
+            }
+            if "summary" not in columns:
+                connection.execute("ALTER TABLE conversations ADD COLUMN summary TEXT")
+            if "summary_through_rowid" not in columns:
+                connection.execute(
+                    "ALTER TABLE conversations "
+                    "ADD COLUMN summary_through_rowid INTEGER NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def _new_id() -> str:
@@ -212,21 +238,145 @@ class ConversationStore:
                     )
         return item_id
 
-    def context_messages(self, conversation_id: str, limit: int = 40) -> list[dict[str, str]]:
+    def context_window(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+        max_chars: int | None = None,
+    ) -> ContextWindow:
+        """Return recent model-visible turns within message and character limits."""
+        limit = (
+            int(os.getenv("HISTORY_REHYDRATE_MESSAGES", str(DEFAULT_REHYDRATE_MESSAGES)))
+            if limit is None
+            else limit
+        )
+        max_chars = (
+            int(os.getenv("HISTORY_REHYDRATE_MAX_CHARS", str(DEFAULT_REHYDRATE_MAX_CHARS)))
+            if max_chars is None
+            else max_chars
+        )
+        if limit <= 0 or max_chars <= 0:
+            return ContextWindow(messages=[], truncated=False, oldest_rowid=None)
+
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT role, content FROM (
-                    SELECT rowid, role, content
-                    FROM messages
-                    WHERE conversation_id = ? AND role IN ('user', 'assistant')
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                ) ORDER BY rowid
+                SELECT rowid, role, content
+                FROM messages
+                WHERE conversation_id = ? AND role IN ('user', 'assistant')
+                ORDER BY rowid DESC
+                LIMIT ?
                 """,
                 (conversation_id, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+            total = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE conversation_id = ? AND role IN ('user', 'assistant')
+                """,
+                (conversation_id,),
+            ).fetchone()["count"]
+
+        selected: list[sqlite3.Row] = []
+        character_count = 0
+        for row in rows:
+            content_length = len(row["content"])
+            if selected and character_count + content_length > max_chars:
+                break
+            selected.append(row)
+            character_count += content_length
+
+        selected.reverse()
+        messages = [
+            {"role": str(row["role"]), "content": str(row["content"])}
+            for row in selected
+        ]
+        return ContextWindow(
+            messages=messages,
+            truncated=len(selected) < total,
+            oldest_rowid=int(selected[0]["rowid"]) if selected else None,
+        )
+
+    def context_messages(
+        self,
+        conversation_id: str,
+        limit: int = DEFAULT_REHYDRATE_MESSAGES,
+    ) -> list[dict[str, str]]:
+        """Backward-compatible shortcut for callers that only need messages."""
+        return self.context_window(conversation_id, limit=limit).messages
+
+    def get_summary(self, conversation_id: str) -> tuple[str | None, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT summary, summary_through_rowid
+                FROM conversations
+                WHERE id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(conversation_id)
+        return row["summary"], int(row["summary_through_rowid"] or 0)
+
+    def unsummarized_messages(
+        self,
+        conversation_id: str,
+        *,
+        after_rowid: int,
+        before_rowid: int,
+        max_chars: int,
+    ) -> list[dict[str, Any]]:
+        """Return the next chronological chunk eligible for summarization."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT rowid, role, content
+                FROM messages
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND rowid > ?
+                  AND rowid < ?
+                ORDER BY rowid
+                """,
+                (conversation_id, after_rowid, before_rowid),
+            ).fetchall()
+
+        selected: list[dict[str, Any]] = []
+        character_count = 0
+        for row in rows:
+            content_length = len(row["content"])
+            if selected and character_count + content_length > max_chars:
+                break
+            selected.append(dict(row))
+            character_count += content_length
+        return selected
+
+    def save_summary(
+        self,
+        conversation_id: str,
+        summary: str,
+        *,
+        through_rowid: int,
+    ) -> None:
+        text = summary.strip()
+        if not text:
+            raise ValueError("Conversation summaries cannot be empty")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE conversations
+                SET summary = ?, summary_through_rowid = ?
+                WHERE id = ? AND summary_through_rowid <= ?
+                """,
+                (text, through_rowid, conversation_id, through_rowid),
+            )
+            if not cursor.rowcount and not connection.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone():
+                raise KeyError(conversation_id)
 
     def delete(self, conversation_id: str) -> str:
         with self._connect() as connection:

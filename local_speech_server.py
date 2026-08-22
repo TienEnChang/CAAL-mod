@@ -1,8 +1,8 @@
-"""OpenAI-compatible Whisper and Kokoro server for CAAL on Apple Silicon.
+"""OpenAI-compatible MLX Whisper and Kokoro server for Apple Silicon.
 
-This intentionally reuses the Python environment and Hugging Face cache from
-the sibling protoVoice installation.  It exposes only the endpoints CAAL uses:
-``/v1/audio/transcriptions``, ``/v1/audio/speech``, and ``/v1/models``.
+The bridge exposes only the endpoints CAAL uses: ``/v1/audio/transcriptions``,
+``/v1/audio/speech``, and ``/v1/models``. Both neural models run through MLX;
+audio decoding and resampling remain ordinary CPU-side preprocessing.
 """
 
 from __future__ import annotations
@@ -13,17 +13,21 @@ import os
 import threading
 from typing import Annotated
 
+import mlx.core as mx
+import mlx_whisper
 import numpy as np
 import soundfile as sf
 import soxr
-import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from mlx_audio.tts.utils import load as load_tts_model
+from mlx_whisper.transcribe import ModelHolder
 from pydantic import BaseModel
-from transformers import pipeline as hf_pipeline
 
-WHISPER_MODEL = os.getenv("CAAL_WHISPER_MODEL", "distil-whisper/distil-medium.en")
-KOKORO_MODEL = os.getenv("CAAL_KOKORO_MODEL", "hexgrad/Kokoro-82M")
+WHISPER_MODEL = os.getenv(
+    "CAAL_WHISPER_MODEL", "mlx-community/distil-whisper-medium.en"
+)
+KOKORO_MODEL = os.getenv("CAAL_KOKORO_MODEL", "mlx-community/Kokoro-82M-bf16")
 KOKORO_LANG = os.getenv("CAAL_KOKORO_LANG", "a")
 DEFAULT_VOICE = os.getenv("CAAL_KOKORO_VOICE", "af_heart")
 SAMPLE_RATE = 24_000
@@ -36,26 +40,12 @@ _whisper_lock = threading.Lock()
 _kokoro_lock = threading.Lock()
 
 
-def _device() -> str:
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
 def _get_whisper():
     global _whisper
     if _whisper is None:
         with _whisper_lock:
             if _whisper is None:
-                device = _device()
-                use_fp16 = device == "mps" and os.getenv("CAAL_STT_FP16", "1") == "1"
-                _whisper = hf_pipeline(
-                    "automatic-speech-recognition",
-                    model=WHISPER_MODEL,
-                    torch_dtype=torch.float16 if use_fp16 else torch.float32,
-                    device=device,
-                    model_kwargs={"attn_implementation": "sdpa"} if device == "mps" else {},
-                )
+                _whisper = ModelHolder.get_model(WHISPER_MODEL, dtype=mx.float16)
     return _whisper
 
 
@@ -64,27 +54,37 @@ def _get_kokoro():
     if _kokoro is None:
         with _kokoro_lock:
             if _kokoro is None:
-                from kokoro import KPipeline
-
-                _kokoro = KPipeline(lang_code=KOKORO_LANG, repo_id=KOKORO_MODEL)
+                _kokoro = load_tts_model(KOKORO_MODEL)
     return _kokoro
 
 
-def _transcribe(audio_bytes: bytes) -> str:
+def _transcribe(audio_bytes: bytes, language: str | None = None) -> str:
     data, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
     if data.ndim > 1:
         data = data.mean(axis=1)
     if sample_rate != 16_000:
         data = soxr.resample(data, sample_rate, 16_000)
-    result = _get_whisper()({"raw": data.flatten(), "sampling_rate": 16_000})
+    _get_whisper()
+    result = mlx_whisper.transcribe(
+        data.flatten(),
+        path_or_hf_repo=WHISPER_MODEL,
+        verbose=None,
+        language=language,
+        fp16=True,
+    )
     return (result.get("text") or "").strip()
 
 
 def _synthesize(text: str, voice: str, speed: float) -> bytes:
     chunks: list[np.ndarray] = []
     pipe = _get_kokoro()
-    for item in pipe(text, voice=voice or DEFAULT_VOICE, speed=speed):
-        audio = item[2] if hasattr(item, "__len__") and len(item) >= 3 else item
+    for item in pipe.generate(
+        text,
+        voice=voice or DEFAULT_VOICE,
+        speed=speed,
+        lang_code=KOKORO_LANG,
+    ):
+        audio = item.audio
         if audio is not None:
             chunks.append(np.asarray(audio, dtype=np.float32))
     if not chunks:
@@ -146,9 +146,9 @@ async def transcriptions(
     response_format: Annotated[str, Form()] = "json",
     language: Annotated[str | None, Form()] = None,
 ):
-    del model, language
+    del model
     try:
-        text = await asyncio.to_thread(_transcribe, await file.read())
+        text = await asyncio.to_thread(_transcribe, await file.read(), language)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Whisper failed: {exc}") from exc
     if response_format == "text":

@@ -49,6 +49,10 @@ from livekit.plugins import groq as groq_plugin  # noqa: E402
 from livekit.plugins import openai, silero  # noqa: E402
 
 from caal import CAALLLM  # noqa: E402
+from caal.conversation_summary import (  # noqa: E402
+    recall_block,
+    refresh_conversation_summary,
+)
 from caal.conversations import ConversationStore  # noqa: E402
 from caal.integrations import (  # noqa: E402
     MemoryTools,
@@ -222,6 +226,7 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         hass_tool_callables: dict | None = None,
         short_term_memory: ShortTermMemory | None = None,
         chat_ctx: llm.ChatContext | None = None,
+        conversation_summary: str | None = None,
     ) -> None:
         super().__init__(
             instructions=load_prompt(language=language),
@@ -254,6 +259,10 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
 
         # Short-term memory for persistent context (MemoryTools mixin requirement)
         self._short_term_memory = short_term_memory
+
+        # Updated in the background as transcript turns leave the verbatim
+        # replay window. llm_node injects this into the system prompt.
+        self._conversation_recall = recall_block(conversation_summary)
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Custom LLM node using provider-agnostic interface."""
@@ -544,8 +553,26 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # underneath an in-flight response.
     conversation_store = ConversationStore()
     conversation_id = conversation_store.ensure_active()
+    conversation_window = conversation_store.context_window(conversation_id)
+    conversation_summary = None
+    if conversation_window.truncated:
+        try:
+            conversation_summary = await refresh_conversation_summary(
+                conversation_store,
+                conversation_id,
+                caal_llm.provider_instance,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to refresh conversation summary: {e}")
+            conversation_summary, _ = conversation_store.get_summary(conversation_id)
+    logger.info(
+        "Rehydrating %s conversation messages (truncated=%s, recall=%s)",
+        len(conversation_window.messages),
+        conversation_window.truncated,
+        bool(conversation_summary),
+    )
     chat_ctx = llm.ChatContext.empty()
-    for saved_message in conversation_store.context_messages(conversation_id):
+    for saved_message in conversation_window.messages:
         chat_ctx.add_message(
             role=saved_message["role"],
             content=saved_message["content"],
@@ -672,7 +699,28 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         hass_tool_callables=hass_tool_callables,
         short_term_memory=short_term_memory,
         chat_ctx=chat_ctx,
+        conversation_summary=(
+            conversation_summary if conversation_window.truncated else None
+        ),
     )
+
+    _summary_lock = asyncio.Lock()
+    _summary_tasks: set[asyncio.Task] = set()
+
+    async def _update_conversation_summary() -> None:
+        async with _summary_lock:
+            try:
+                summary = await refresh_conversation_summary(
+                    conversation_store,
+                    conversation_id,
+                    caal_llm.provider_instance,
+                )
+                window = conversation_store.context_window(conversation_id)
+                assistant._conversation_recall = (
+                    recall_block(summary) if window.truncated else ""
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update conversation summary: {e}")
 
     async def _publish_conversation_updated() -> None:
         import json
@@ -707,6 +755,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 metadata={"interrupted": item.interrupted},
             )
             asyncio.create_task(_publish_conversation_updated())
+            if item.role == "assistant":
+                task = asyncio.create_task(_update_conversation_summary())
+                _summary_tasks.add(task)
+                task.add_done_callback(_summary_tasks.discard)
         except Exception as e:
             logger.warning(f"Failed to persist conversation item: {e}")
 

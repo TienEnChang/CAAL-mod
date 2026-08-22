@@ -1,3 +1,5 @@
+import sqlite3
+
 from caal.conversations import ConversationStore
 
 
@@ -78,3 +80,78 @@ def test_message_requires_existing_conversation(tmp_path):
         assert error.args == ("missing",)
     else:
         raise AssertionError("append_message accepted a missing conversation")
+
+
+def test_context_window_obeys_message_and_character_budgets(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    for index, content in enumerate(["one", "two", "three", "four"]):
+        store.append_message(
+            conversation_id,
+            role="user" if index % 2 == 0 else "assistant",
+            content=content,
+            message_id=f"message-{index}",
+        )
+
+    by_count = store.context_window(conversation_id, limit=2, max_chars=100)
+    assert by_count.messages == [
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    assert by_count.truncated is True
+
+    by_chars = store.context_window(conversation_id, limit=4, max_chars=9)
+    assert by_chars.messages == [
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    assert by_chars.truncated is True
+
+
+def test_summary_state_and_source_exclude_tool_rows(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(conversation_id, role="user", content="Remember Taipei")
+    store.append_message(conversation_id, role="tool", content="Used weather")
+    store.append_message(conversation_id, role="assistant", content="I will remember")
+    window = store.context_window(conversation_id, limit=1, max_chars=100)
+
+    pending = store.unsummarized_messages(
+        conversation_id,
+        after_rowid=0,
+        before_rowid=window.oldest_rowid,
+        max_chars=100,
+    )
+    assert [(message["role"], message["content"]) for message in pending] == [
+        ("user", "Remember Taipei")
+    ]
+
+    store.save_summary(
+        conversation_id,
+        "The user asked CAAL to remember Taipei.",
+        through_rowid=pending[-1]["rowid"],
+    )
+    assert store.get_summary(conversation_id) == (
+        "The user asked CAAL to remember Taipei.",
+        pending[-1]["rowid"],
+    )
+
+
+def test_existing_database_is_migrated_for_summaries(tmp_path):
+    database_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+
+    store = ConversationStore(database_path)
+    conversation_id = store.ensure_active()
+
+    assert store.get_summary(conversation_id) == (None, 0)
