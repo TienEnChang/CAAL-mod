@@ -1,35 +1,10 @@
-import { headers } from 'next/headers';
-import { getAppConfig } from '@/lib/utils';
-
 interface LayoutProps {
   children: React.ReactNode;
 }
 
-export default async function Layout({ children }: LayoutProps) {
-  const hdrs = await headers();
-  const { companyName, logo, logoDark } = await getAppConfig(hdrs);
-
+export default function Layout({ children }: LayoutProps) {
   return (
     <>
-      {/* Logo - top left */}
-      <header className="fixed top-0 left-0 z-40 hidden p-6 md:block">
-        <a
-          target="_blank"
-          rel="noopener noreferrer"
-          href="https://www.youtube.com/@coreworxlab"
-          className="scale-100 transition-transform duration-300 hover:scale-110"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={logo} alt={`${companyName} Logo`} className="block size-6 dark:hidden" />
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={logoDark ?? logo}
-            alt={`${companyName} Logo`}
-            className="hidden size-12 dark:block"
-          />
-        </a>
-      </header>
-
       {children}
 
       {/* Branding - bottom right */}
