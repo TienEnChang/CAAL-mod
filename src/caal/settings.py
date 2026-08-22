@@ -432,6 +432,7 @@ def load_prompt_with_context(
     timezone_display: str = "Pacific Time",
     language: str = "en",
     prompt_name: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Load prompt and populate with date/time context.
 
@@ -442,6 +443,7 @@ def load_prompt_with_context(
         timezone_id: IANA timezone ID for current time
         timezone_display: Human-readable timezone name
         language: ISO 639-1 language code ("en" or "fr")
+        agent_name: Configured assistant name. If omitted, uses settings.
 
     Returns:
         Prompt with {{CURRENT_DATE_CONTEXT}} and {{TIMEZONE}} replaced
@@ -452,6 +454,20 @@ def load_prompt_with_context(
     )
 
     template = load_prompt_content(prompt_name=prompt_name, language=language)
+
+    configured_name = agent_name
+    if configured_name is None:
+        configured_name = get_setting("agent_name", "Cal")
+    configured_name = " ".join(str(configured_name).split())[:64] or "Cal"
+    quoted_name = json.dumps(configured_name, ensure_ascii=False)
+
+    identity_context = (
+        "# Configured Assistant Identity\n\n"
+        f"Your configured name is {quoted_name}. Use this exact name when "
+        "introducing yourself or answering questions about your name. This "
+        "configured identity overrides generic product names such as CAAL or "
+        "Cal elsewhere in this prompt. Do not refuse to use the configured name."
+    )
 
     now = datetime.now(ZoneInfo(timezone_id))
 
@@ -496,7 +512,7 @@ def load_prompt_with_context(
     prompt = template.replace("{{CURRENT_DATE_CONTEXT}}", date_context)
     prompt = prompt.replace("{{TIMEZONE}}", timezone_display)
 
-    return prompt
+    return f"{identity_context}\n\n{prompt}"
 
 
 def custom_prompt_exists() -> bool:
