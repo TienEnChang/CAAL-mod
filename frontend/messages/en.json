@@ -35,6 +35,8 @@
       "sttTitle": "Speech Recognition (STT)",
       "llmTitle": "Language Model (LLM)",
       "ttsTitle": "Text-to-Speech (TTS)",
+      "voiceVolume": "Voice volume",
+      "voiceVolumeDesc": "100% is the normal level. Boost up to 200% for quieter voices.",
       "sttSpeachesDesc": "Local via Whisper. Private, on your hardware.",
       "sttGroqDesc": "Cloud via Groq Whisper. Fast and accurate.",
       "sttGroqKeyNote": "Requires a Groq API key (shared with LLM if using Groq).",

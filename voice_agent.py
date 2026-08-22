@@ -421,7 +421,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # Load wake word settings
     all_settings = settings_module.load_settings()
     wake_word_enabled = all_settings.get("wake_word_enabled", False)
-    session_vad = silero.VAD.load()
+    session_vad = silero.VAD.load(min_silence_duration=1.0)
 
     # Session reference for wake word callback (set after session creation)
     _session_ref: AgentSession | None = None

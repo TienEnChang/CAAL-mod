@@ -1,22 +1,28 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { SessionView } from '@/components/app/session-view';
 import { MemoryPanel } from '@/components/memory';
 import { SettingsPanel } from '@/components/settings/settings-panel';
 import { ToolsPanel } from '@/components/tools';
+import { preferBuiltInMacMicrophone } from '@/lib/preferred-microphone';
 
 interface ViewControllerProps {
   appConfig: AppConfig;
 }
 
 export function ViewController({ appConfig }: ViewControllerProps) {
-  const { start } = useSessionContext();
+  const session = useSessionContext();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+
+  const start = useCallback(async () => {
+    await preferBuiltInMacMicrophone(session.room);
+    await session.start();
+  }, [session]);
 
   return (
     <>

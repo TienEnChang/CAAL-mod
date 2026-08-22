@@ -387,7 +387,7 @@ start_named() {
   wait_http "$name"
   if [[ "$name" == "speech" ]]; then
     curl -fsS -X POST \
-      "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-medium.en}" \
+      "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-large-v3}" \
       >/dev/null
     curl -fsS -X POST \
       "http://127.0.0.1:$SPEECH_PORT/v1/models?model_name=${CAAL_KOKORO_MODEL:-mlx-community/Kokoro-82M-bf16}" \
@@ -477,7 +477,7 @@ export OPENAI_BASE_URL="http://127.0.0.1:$QWEN_PORT/v1"
 export OPENAI_MODEL="$QWEN_MODEL"
 export STT_PROVIDER="speaches"
 export SPEACHES_URL="http://127.0.0.1:$SPEECH_PORT"
-export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-medium.en}"
+export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-large-v3}"
 export TTS_PROVIDER="kokoro"
 export KOKORO_URL="http://127.0.0.1:$SPEECH_PORT"
 export TTS_MODEL="${CAAL_KOKORO_MODEL:-mlx-community/Kokoro-82M-bf16}"

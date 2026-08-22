@@ -19,6 +19,7 @@ import {
 import { Button } from '@/components/livekit/button';
 import { saveThemeToCache } from '@/hooks/useCaalTheme';
 import { type ThemeName, generateThemeCSS, getTheme } from '@/lib/theme';
+import { MAX_VOICE_VOLUME, announceVoiceVolume, normalizeVoiceVolume } from '@/lib/voice-volume';
 
 // =============================================================================
 // Types
@@ -48,6 +49,7 @@ interface Settings {
   tts_provider: 'kokoro' | 'piper';
   tts_voice_kokoro: string;
   tts_voice_piper: string;
+  voice_volume: number;
   // LLM settings
   temperature: number;
   num_ctx: number;
@@ -101,6 +103,7 @@ const DEFAULT_SETTINGS: Settings = {
   tts_provider: 'kokoro',
   tts_voice_kokoro: 'am_puck',
   tts_voice_piper: 'speaches-ai/piper-en_US-ryan-high',
+  voice_volume: 1,
   temperature: 0.15,
   num_ctx: 8192,
   max_turns: 20,
@@ -267,7 +270,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         const data = await settingsRes.json();
         // Merge with defaults to ensure new fields have values
         const loadedSettings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+        loadedSettings.voice_volume = normalizeVoiceVolume(loadedSettings.voice_volume);
         setSettings(loadedSettings);
+        announceVoiceVolume(loadedSettings.voice_volume);
         setSettingsLoadedFromApi(true);
         // Sync theme to localStorage for instant load next time
         if (loadedSettings.theme) {
@@ -278,6 +283,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         lang = loadedSettings.language || 'en';
       } else {
         setSettings(DEFAULT_SETTINGS);
+        announceVoiceVolume(DEFAULT_SETTINGS.voice_volume);
         setPromptContent(DEFAULT_PROMPT);
       }
 
@@ -306,6 +312,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       console.error('Error loading settings:', err);
       setError(t('errors.loadFailed'));
       setSettings(DEFAULT_SETTINGS);
+      announceVoiceVolume(DEFAULT_SETTINGS.voice_volume);
       setPromptContent(DEFAULT_PROMPT);
     } finally {
       setLoading(false);
@@ -1137,6 +1144,32 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               </option>
             )}
           </select>
+        </div>
+
+        <div className="space-y-2 pt-2">
+          <div className="flex items-center justify-between">
+            <label htmlFor="voice-volume" className="text-sm font-medium">
+              {t('pipeline.voiceVolume')}
+            </label>
+            <span className="text-muted-foreground text-sm tabular-nums">
+              {Math.round(settings.voice_volume * 100)}%
+            </span>
+          </div>
+          <input
+            id="voice-volume"
+            type="range"
+            min="0"
+            max={MAX_VOICE_VOLUME}
+            step="0.05"
+            value={settings.voice_volume}
+            onChange={(event) => {
+              const voiceVolume = normalizeVoiceVolume(event.target.value);
+              setSettings({ ...settings, voice_volume: voiceVolume });
+              announceVoiceVolume(voiceVolume);
+            }}
+            className="bg-muted accent-primary h-2 w-full cursor-pointer appearance-none rounded-lg"
+          />
+          <p className="text-muted-foreground text-xs">{t('pipeline.voiceVolumeDesc')}</p>
         </div>
       </div>
     </div>

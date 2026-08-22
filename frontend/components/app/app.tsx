@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { TokenSource } from 'livekit-client';
+import { Room, TokenSource } from 'livekit-client';
 import { SessionProvider, StartAudio, useSession } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { AgentAudioRenderer } from '@/components/app/agent-audio-renderer';
@@ -94,9 +94,11 @@ export function App({ appConfig }: AppProps) {
       : TokenSource.endpoint('/api/connection-details');
   }, [appConfig]);
 
+  const room = useMemo(() => new Room({ webAudioMix: true }), []);
+
   const session = useSession(
     tokenSource,
-    appConfig.agentName ? { agentName: appConfig.agentName } : undefined
+    appConfig.agentName ? { agentName: appConfig.agentName, room } : { room }
   );
 
   // Clean up session on page unload to prevent orphaned agent jobs

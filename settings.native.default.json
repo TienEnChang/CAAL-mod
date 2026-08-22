@@ -9,6 +9,7 @@
   "tts_provider": "kokoro",
   "tts_voice_kokoro": "af_heart",
   "tts_voice_piper": "speaches-ai/piper-en_US-ryan-high",
+  "voice_volume": 1.0,
   "temperature": 0.15,
   "ollama_host": "",
   "ollama_model": "",

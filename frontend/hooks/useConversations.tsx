@@ -3,6 +3,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { RoomEvent } from 'livekit-client';
 import { useSessionContext } from '@livekit/components-react';
+import { preferBuiltInMacMicrophone } from '@/lib/preferred-microphone';
 
 export interface ConversationSummary {
   id: string;
@@ -28,6 +29,7 @@ interface ConversationContextValue {
   error: string | null;
   createConversation: () => Promise<void>;
   selectConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => Promise<boolean>;
   deleteConversation: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -116,7 +118,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const selectedId = await action();
       setActiveId(selectedId);
       await refresh();
-      if (reconnect) await session.start();
+      if (reconnect) {
+        await preferBuiltInMacMicrophone(session.room);
+        await session.start();
+      }
     },
     [refresh, session]
   );
@@ -184,6 +189,33 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     [reconnectAround]
   );
 
+  const renameConversation = useCallback(async (id: string, title: string) => {
+    const cleanedTitle = title.trim();
+    if (!cleanedTitle) return false;
+
+    setError(null);
+    try {
+      const result = await responseJson<{ title: string }>(
+        await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: cleanedTitle }),
+        })
+      );
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === id ? { ...conversation, title: result.title } : conversation
+        )
+      );
+      return true;
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : 'Unable to rename conversation'
+      );
+      return false;
+    }
+  }, []);
+
   const value = useMemo(
     () => ({
       conversations,
@@ -193,6 +225,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       error,
       createConversation,
       selectConversation,
+      renameConversation,
       deleteConversation,
       refresh,
     }),
@@ -204,6 +237,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       error,
       createConversation,
       selectConversation,
+      renameConversation,
       deleteConversation,
       refresh,
     ]

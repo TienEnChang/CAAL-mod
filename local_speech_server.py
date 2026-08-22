@@ -25,7 +25,7 @@ from mlx_whisper.transcribe import ModelHolder
 from pydantic import BaseModel
 
 WHISPER_MODEL = os.getenv(
-    "CAAL_WHISPER_MODEL", "mlx-community/distil-whisper-medium.en"
+    "CAAL_WHISPER_MODEL", "mlx-community/distil-whisper-large-v3"
 )
 KOKORO_MODEL = os.getenv("CAAL_KOKORO_MODEL", "mlx-community/Kokoro-82M-bf16")
 KOKORO_LANG = os.getenv("CAAL_KOKORO_LANG", "a")

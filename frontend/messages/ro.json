@@ -35,6 +35,8 @@
       "sttTitle": "Recunoaștere vocală (STT)",
       "llmTitle": "Model de limbaj (LLM)",
       "ttsTitle": "Text-în-vorbire (TTS)",
+      "voiceVolume": "Volumul vocii",
+      "voiceVolumeDesc": "100% este nivelul normal. Amplifică până la 200% pentru vocile mai slabe.",
       "sttSpeachesDesc": "Local prin Whisper. Privat, pe hardware-ul tău.",
       "sttGroqDesc": "Cloud prin Groq Whisper. Rapid și precis.",
       "sttGroqKeyNote": "Necesită o cheie API Groq (partajată cu LLM dacă folosești Groq).",

@@ -35,6 +35,8 @@
       "sttTitle": "Reconnaissance vocale (STT)",
       "llmTitle": "Modèle de langage (LLM)",
       "ttsTitle": "Synthèse vocale (TTS)",
+      "voiceVolume": "Volume de la voix",
+      "voiceVolumeDesc": "100 % est le niveau normal. Amplifiez jusqu'à 200 % pour les voix plus faibles.",
       "sttSpeachesDesc": "Locale via Whisper. Privée, sur votre matériel.",
       "sttGroqDesc": "Cloud via Groq Whisper. Rapide et précise.",
       "sttGroqKeyNote": "Nécessite une clé API Groq (partagée avec le LLM si Groq est utilisé).",

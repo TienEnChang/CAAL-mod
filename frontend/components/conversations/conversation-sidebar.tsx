@@ -1,7 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { ListIcon, PlusIcon, TrashIcon, XIcon } from '@phosphor-icons/react/dist/ssr';
+import {
+  CheckIcon,
+  ListIcon,
+  PencilSimpleIcon,
+  PlusIcon,
+  TrashIcon,
+  XIcon,
+} from '@phosphor-icons/react/dist/ssr';
 import { useConversations } from '@/hooks/useConversations';
 import { cn } from '@/lib/utils';
 
@@ -58,9 +65,18 @@ function ConversationSidebar({ onNavigate }: { onNavigate?: () => void }) {
     error,
     createConversation,
     selectConversation,
+    renameConversation,
     deleteConversation,
   } = useConversations();
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState('');
+
+  const commitRename = async (id: string) => {
+    if (await renameConversation(id, titleDraft)) {
+      setEditing(null);
+    }
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -93,23 +109,65 @@ function ConversationSidebar({ onNavigate }: { onNavigate?: () => void }) {
               conversation.id === activeId ? 'bg-sidebar-accent' : 'hover:bg-sidebar-accent/60'
             )}
           >
-            <button
-              type="button"
-              onClick={() => {
-                void selectConversation(conversation.id);
-                onNavigate?.();
-              }}
-              className="w-full rounded-lg px-3 py-2.5 pr-10 text-left"
-            >
-              <span className="text-sidebar-foreground block truncate text-sm">
-                {conversation.title}
-              </span>
-              <span className="text-muted-foreground mt-1 block font-mono text-[11px]">
-                {relativeTime(conversation.updated_at)} · {conversation.message_count} messages
-              </span>
-            </button>
+            {editing === conversation.id ? (
+              <form
+                className="px-3 py-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void commitRename(conversation.id);
+                }}
+              >
+                <div className="flex items-center gap-1">
+                  <input
+                    autoFocus
+                    maxLength={64}
+                    aria-label="Conversation title"
+                    value={titleDraft}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') setEditing(null);
+                    }}
+                    className="border-border bg-background text-sidebar-foreground focus:border-primary min-w-0 flex-1 rounded border px-2 py-1 text-sm outline-none"
+                  />
+                  <button
+                    type="submit"
+                    aria-label="Save conversation title"
+                    className="text-primary hover:bg-primary/10 rounded p-1.5"
+                  >
+                    <CheckIcon className="h-4 w-4" weight="bold" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Cancel rename"
+                    onClick={() => setEditing(null)}
+                    className="text-muted-foreground hover:text-foreground rounded p-1.5"
+                  >
+                    <XIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                <span className="text-muted-foreground mt-1 block font-mono text-[11px]">
+                  {relativeTime(conversation.updated_at)} · {conversation.message_count} messages
+                </span>
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  void selectConversation(conversation.id);
+                  onNavigate?.();
+                }}
+                className="w-full rounded-lg px-3 py-2.5 pr-16 text-left"
+              >
+                <span className="text-sidebar-foreground block truncate text-sm">
+                  {conversation.title}
+                </span>
+                <span className="text-muted-foreground mt-1 block font-mono text-[11px]">
+                  {relativeTime(conversation.updated_at)} · {conversation.message_count} messages
+                </span>
+              </button>
+            )}
 
-            {confirming === conversation.id ? (
+            {editing === conversation.id ? null : confirming === conversation.id ? (
               <div className="bg-sidebar-accent absolute inset-y-1 right-1 flex items-center gap-1 rounded-md pl-2">
                 <button
                   type="button"
@@ -130,14 +188,33 @@ function ConversationSidebar({ onNavigate }: { onNavigate?: () => void }) {
                 </button>
               </div>
             ) : (
-              <button
-                type="button"
-                aria-label={`Delete ${conversation.title}`}
-                onClick={() => setConfirming(conversation.id)}
-                className="text-muted-foreground hover:text-foreground absolute top-2 right-2 rounded p-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+              <div
+                className={cn(
+                  'absolute top-2 right-2 flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100',
+                  conversation.id === activeId && 'opacity-100'
+                )}
               >
-                <TrashIcon className="h-4 w-4" />
-              </button>
+                <button
+                  type="button"
+                  aria-label={`Rename ${conversation.title}`}
+                  onClick={() => {
+                    setConfirming(null);
+                    setEditing(conversation.id);
+                    setTitleDraft(conversation.title);
+                  }}
+                  className="text-muted-foreground hover:text-foreground rounded p-1.5"
+                >
+                  <PencilSimpleIcon className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${conversation.title}`}
+                  onClick={() => setConfirming(conversation.id)}
+                  className="text-muted-foreground hover:text-foreground rounded p-1.5"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                </button>
+              </div>
             )}
           </div>
         ))}

@@ -51,6 +51,28 @@ def test_delete_active_selects_remaining_conversation(tmp_path):
     assert store.list()["active_id"] == first_id
 
 
+def test_rename_conversation_persists_and_prevents_automatic_retitle(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+
+    assert store.rename(conversation_id, "  Taipei planning  ") == "Taipei planning"
+    store.append_message(conversation_id, role="user", content="This should not replace the title")
+
+    assert store.detail(conversation_id)["conversation"]["title"] == "Taipei planning"
+
+
+def test_rename_rejects_blank_title(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+
+    try:
+        store.rename(conversation_id, "   ")
+    except ValueError as error:
+        assert str(error) == "Conversation title cannot be empty"
+    else:
+        raise AssertionError("rename accepted a blank conversation title")
+
+
 def test_duplicate_message_id_is_ignored(tmp_path):
     store = ConversationStore(tmp_path / "conversations.sqlite3")
     conversation_id = store.ensure_active()

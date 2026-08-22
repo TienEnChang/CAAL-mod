@@ -35,6 +35,8 @@
       "sttTitle": "Talegenkendelse (STT)",
       "llmTitle": "Sprogmodel (LLM)",
       "ttsTitle": "Tekst-til-tale (TTS)",
+      "voiceVolume": "Stemmelydstyrke",
+      "voiceVolumeDesc": "100 % er det normale niveau. Forstærk op til 200 % for svagere stemmer.",
       "sttSpeachesDesc": "Lokal via Whisper. Privat, på din egen hardware.",
       "sttGroqDesc": "Sky via Groq Whisper. Hurtig og præcis.",
       "sttGroqKeyNote": "Kræver en Groq API-nøgle (deles med LLM hvis Groq bruges).",

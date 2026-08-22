@@ -171,10 +171,11 @@ class ConversationCreateRequest(BaseModel):
     title: str = "New conversation"
 
 
-class ConversationActivateRequest(BaseModel):
-    """Select the conversation used by the next agent session."""
+class ConversationUpdateRequest(BaseModel):
+    """Update a local conversation or select it for the next agent session."""
 
-    active: bool = True
+    active: bool = False
+    title: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -388,17 +389,27 @@ async def get_conversation(conversation_id: str) -> dict:
 
 
 @app.patch("/conversations/{conversation_id}")
-async def activate_conversation(
-    conversation_id: str, req: ConversationActivateRequest
+async def update_conversation(
+    conversation_id: str, req: ConversationUpdateRequest
 ) -> dict[str, str]:
-    """Activate a conversation for subsequent voice turns."""
-    if not req.active:
-        raise HTTPException(status_code=400, detail="Only activation is supported")
+    """Rename a conversation and/or activate it for subsequent voice turns."""
+    if not req.active and req.title is None:
+        raise HTTPException(status_code=400, detail="No conversation update was provided")
+
+    store = get_conversation_store()
     try:
-        get_conversation_store().activate(conversation_id)
+        title = store.rename(conversation_id, req.title) if req.title is not None else None
+        if req.active:
+            store.activate(conversation_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found") from exc
-    return {"active_id": conversation_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = {"active_id": store.ensure_active()}
+    if title is not None:
+        result["title"] = title
+    return result
 
 
 @app.delete("/conversations/{conversation_id}")

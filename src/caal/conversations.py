@@ -145,6 +145,20 @@ class ConversationStore:
                 (conversation_id,),
             )
 
+    def rename(self, conversation_id: str, title: str) -> str:
+        cleaned_title = title.strip()[:64]
+        if not cleaned_title:
+            raise ValueError("Conversation title cannot be empty")
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE conversations SET title = ? WHERE id = ?",
+                (cleaned_title, conversation_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(conversation_id)
+        return cleaned_title
+
     def list(self) -> dict[str, Any]:
         active_id = self.ensure_active()
         with self._connect() as connection:

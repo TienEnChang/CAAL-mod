@@ -235,12 +235,12 @@ class WakeWordGatedStream(RecognizeStream):
         """Main processing loop."""
 
         # Create StreamAdapter to wrap the non-streaming STT with VAD
-        vad = silero.VAD.load()
+        vad = silero.VAD.load(min_silence_duration=1.0)
         stream_adapter = StreamAdapter(stt=self._inner_stt, vad=vad)
 
         # Create a separate VAD stream for tracking speech activity
         # This lets us know when the user is still speaking (not just when STT returns)
-        speech_vad = silero.VAD.load()
+        speech_vad = silero.VAD.load(min_silence_duration=1.0)
         vad_stream = speech_vad.stream()
 
         # Get a stream from the adapter
