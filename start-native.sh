@@ -8,6 +8,7 @@
 #   ./start-native.sh --restart <service>   Restart one service in place
 #   ./start-native.sh --stop                Stop all native services
 #   ./start-native.sh --status              Show service status
+#   ./start-native.sh --attach [mode]       Attach to the persistent supervisor
 #   ./start-native.sh --logs [service]      Follow one service log (agent by default)
 #   ./start-native.sh --help                Show commands and port overrides
 
@@ -15,6 +16,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PROJECT_DIR="$(pwd)"
+TMUX_BIN="${CAAL_TMUX_BIN:-$(command -v tmux || true)}"
+TMUX_SESSION_BASE="${CAAL_TMUX_SESSION:-caal-stable}"
+LAUNCHD_LABEL="${CAAL_LAUNCHD_LABEL:-com.coreworxlab.caal}"
+TMUX_CHILD=false
+if [[ "${1:-}" == "--tmux-child" ]]; then
+  TMUX_CHILD=true
+  shift
+fi
+
 RUNTIME_DIR="$PROJECT_DIR/.native"
 BIN_DIR="$RUNTIME_DIR/bin"
 CONFIG_DIR="$RUNTIME_DIR/config"
@@ -60,8 +70,13 @@ Commands:
   --restart <service>         Restart qwen, speech, livekit, agent, or frontend
   --stop                      Stop every native service
   --status                    Show service PIDs and detect untracked CAAL processes
+  --attach [all|models|app]   Attach to a persistent supervisor (all by default)
   --logs [service]            Follow a service log; defaults to agent
   --help                      Show this help
+
+Persistent runtime:
+  Start commands run inside tmux so CAAL survives terminal and Codex sessions.
+  CAAL_TMUX_SESSION           Base tmux session name ($TMUX_SESSION_BASE)
 
 Port overrides:
   CAAL_QWEN_PORT              Qwen OpenAI-compatible API ($QWEN_PORT)
@@ -74,6 +89,79 @@ Port overrides:
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
 EOF
+}
+
+require_tmux() {
+  if [[ -z "$TMUX_BIN" ]] || ! "$TMUX_BIN" -V >/dev/null 2>&1; then
+    echo "tmux is required for persistent native startup. Install it with: brew install tmux" >&2
+    return 1
+  fi
+}
+
+tmux_session_name() {
+  case "$1" in
+    all) echo "$TMUX_SESSION_BASE" ;;
+    models) echo "$TMUX_SESSION_BASE-models" ;;
+    app) echo "$TMUX_SESSION_BASE-app" ;;
+  esac
+}
+
+tmux_session_is_running() {
+  local session
+  session="$(tmux_session_name "$1")"
+  [[ -n "$TMUX_BIN" ]] && "$TMUX_BIN" has-session -t "=$session" 2>/dev/null
+}
+
+status_tmux_sessions() {
+  local mode session found=false
+  for mode in all models app; do
+    session="$(tmux_session_name "$mode")"
+    if tmux_session_is_running "$mode"; then
+      printf 'tmux %-8s running (%s)\n' "$mode" "$session"
+      found=true
+    fi
+  done
+  [[ "$found" == true ]] || echo "tmux supervisors: stopped"
+}
+
+launchd_is_loaded() {
+  launchctl print "system/$LAUNCHD_LABEL" >/dev/null 2>&1
+}
+
+launchd_is_running() {
+  launchctl print "system/$LAUNCHD_LABEL" 2>/dev/null | grep -q 'state = running'
+}
+
+status_launchd() {
+  if launchd_is_running; then
+    echo "launchd supervisor: running ($LAUNCHD_LABEL)"
+  elif launchd_is_loaded; then
+    echo "launchd supervisor: loaded, not running ($LAUNCHD_LABEL)"
+  else
+    echo "launchd supervisor: not loaded"
+  fi
+}
+
+stop_tmux_session() {
+  local mode="$1" session
+  session="$(tmux_session_name "$mode")"
+  tmux_session_is_running "$mode" || return 0
+
+  echo "Stopping tmux supervisor: $session"
+  "$TMUX_BIN" send-keys -t "=$session" C-c 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    tmux_session_is_running "$mode" || return 0
+    sleep 0.5
+  done
+
+  echo "Supervisor did not exit cleanly; closing tmux session $session" >&2
+  "$TMUX_BIN" kill-session -t "=$session" 2>/dev/null || true
+}
+
+stop_tmux_sessions() {
+  local mode
+  [[ -n "$TMUX_BIN" ]] || return 0
+  for mode in "$@"; do stop_tmux_session "$mode"; done
 }
 
 is_service() {
@@ -311,7 +399,11 @@ prepare_frontend() {
 start_service() {
   local name="$1"
   shift
-  nohup "$@" >"$LOG_DIR/$name.log" 2>&1 &
+  if [[ "${CAAL_LAUNCHD:-false}" == "true" ]]; then
+    "$@" >"$LOG_DIR/$name.log" 2>&1 &
+  else
+    nohup "$@" >"$LOG_DIR/$name.log" 2>&1 &
+  fi
   local pid=$!
   echo "$pid" >"$PID_DIR/$name.pid"
   echo "  started $name (PID $pid)"
@@ -322,7 +414,11 @@ start_service_in() {
   shift 2
   (
     cd "$directory"
-    exec nohup "$@"
+    if [[ "${CAAL_LAUNCHD:-false}" == "true" ]]; then
+      exec "$@"
+    else
+      exec nohup "$@"
+    fi
   ) >"$LOG_DIR/$name.log" 2>&1 &
   local pid=$!
   echo "$pid" >"$PID_DIR/$name.pid"
@@ -342,6 +438,101 @@ wait_http() {
     sleep 1
   done
   echo "$name did not become ready at $url; see $LOG_DIR/$name.log" >&2
+  return 1
+}
+
+wait_for_tmux_supervisor() {
+  local mode="$1"
+  for _ in $(seq 1 20); do
+    supervisor_is_running "$mode" && return 0
+    if ! tmux_session_is_running "$mode"; then
+      echo "The tmux supervisor exited during startup. Check logs in $LOG_DIR." >&2
+      return 1
+    fi
+    sleep 0.5
+  done
+  echo "The tmux supervisor did not register in time. Check logs in $LOG_DIR." >&2
+  return 1
+}
+
+launch_tmux_supervisor() {
+  local mode="$1" command session name
+  require_tmux
+  session="$(tmux_session_name "$mode")"
+
+  if launchd_is_loaded; then
+    echo "CAAL is managed by launchd service: $LAUNCHD_LABEL"
+    echo "Status: ./launchd/manage.sh status"
+    return 0
+  fi
+
+  if tmux_session_is_running "$mode"; then
+    echo "CAAL $mode supervisor is already running in tmux session: $session"
+    return 0
+  fi
+
+  printf -v command '%q --tmux-child' "$PROJECT_DIR/start-native.sh"
+  case "$mode" in
+    models) command+=" --models" ;;
+    app) command+=" --app" ;;
+  esac
+
+  echo "Starting CAAL $mode supervisor in persistent tmux session: $session"
+  "$TMUX_BIN" new-session -d -s "$session" -c "$PROJECT_DIR" "$command"
+  wait_for_tmux_supervisor "$mode"
+
+  case "$mode" in
+    all)
+      for name in "${ALL_SERVICES[@]}"; do wait_http "$name"; done
+      echo "CAAL is ready: http://localhost:$FRONTEND_PORT"
+      ;;
+    models)
+      for name in "${MODEL_SERVICES[@]}"; do wait_http "$name"; done
+      echo "Model services are ready."
+      ;;
+    app)
+      for name in "${APP_SERVICES[@]}"; do wait_http "$name"; done
+      echo "CAAL is ready: http://localhost:$FRONTEND_PORT"
+      ;;
+  esac
+  echo "Attach with: ./start-native.sh --attach $mode"
+}
+
+managed_tmux_mode_for_service() {
+  local service="$1"
+  if supervisor_is_running all && tmux_session_is_running all; then
+    echo all
+  elif [[ "$service" == "qwen" || "$service" == "speech" ]] && \
+    supervisor_is_running models && tmux_session_is_running models; then
+    echo models
+  elif [[ "$service" == "livekit" || "$service" == "agent" || "$service" == "frontend" ]] && \
+    supervisor_is_running app && tmux_session_is_running app; then
+    echo app
+  fi
+}
+
+restart_in_tmux() {
+  local service="$1" mode session command old_pid="" new_pid=""
+  mode="$(managed_tmux_mode_for_service "$service")"
+  [[ -n "$mode" ]] || return 1
+  session="$(tmux_session_name "$mode")"
+  [[ -f "$PID_DIR/$service.pid" ]] && old_pid="$(<"$PID_DIR/$service.pid")"
+
+  printf -v command '%q --tmux-child --restart %q' "$PROJECT_DIR/start-native.sh" "$service"
+  "$TMUX_BIN" new-window -d -t "=$session" -n "restart-$service" "$command"
+
+  for _ in $(seq 1 120); do
+    if [[ -f "$PID_DIR/$service.pid" ]]; then
+      new_pid="$(<"$PID_DIR/$service.pid")"
+      if [[ "$new_pid" != "$old_pid" ]] && pid_matches_service "$service" "$new_pid" && \
+        curl -fsS "$(service_url "$service")" >/dev/null 2>&1; then
+        echo "$service restarted successfully"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo "$service did not restart successfully; see $LOG_DIR/$service.log" >&2
   return 1
 }
 
@@ -485,12 +676,43 @@ export TTS_VOICE="${CAAL_KOKORO_VOICE:-af_heart}"
 export TIMEZONE="${CAAL_TIMEZONE:-Asia/Taipei}"
 export TIMEZONE_DISPLAY="${CAAL_TIMEZONE_DISPLAY:-Taipei Time}"
 
+if [[ "$TMUX_CHILD" != true ]]; then
+  case "${1:-}" in
+    "")
+      launch_tmux_supervisor all
+      exit 0
+      ;;
+    --models)
+      launch_tmux_supervisor models
+      exit 0
+      ;;
+    --app)
+      launch_tmux_supervisor app
+      exit 0
+      ;;
+    --restart)
+      restart_service="${2:-}"
+      is_service "$restart_service" || {
+        echo "Usage: ./start-native.sh --restart <qwen|speech|livekit|agent|frontend>" >&2
+        exit 2
+      }
+      if restart_in_tmux "$restart_service"; then
+        exit 0
+      fi
+      ;;
+  esac
+fi
+
 case "${1:-}" in
   --help|-h)
     usage
     exit 0
     ;;
   --stop)
+    if [[ "$TMUX_CHILD" != true ]] && launchd_is_loaded; then
+      exec "$PROJECT_DIR/launchd/manage.sh" stop
+    fi
+    stop_tmux_sessions all app models
     stop_supervisors all app models
     stop_all
     exit 0
@@ -498,6 +720,26 @@ case "${1:-}" in
   --status)
     for name in "${ALL_SERVICES[@]}"; do status_one "$name"; done
     status_supervisors
+    status_tmux_sessions
+    status_launchd
+    exit 0
+    ;;
+  --attach)
+    attach_mode="${2:-all}"
+    case "$attach_mode" in
+      all|models|app) ;;
+      *)
+        echo "Usage: ./start-native.sh --attach [all|models|app]" >&2
+        exit 2
+        ;;
+    esac
+    require_tmux
+    attach_session="$(tmux_session_name "$attach_mode")"
+    if ! tmux_session_is_running "$attach_mode"; then
+      echo "tmux session is not running: $attach_session" >&2
+      exit 1
+    fi
+    exec "$TMUX_BIN" attach-session -t "=$attach_session"
     exit 0
     ;;
   --logs)

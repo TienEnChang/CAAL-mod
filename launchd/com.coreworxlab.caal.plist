@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.coreworxlab.caal</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/altspace/Public/caal/launchd/run-caal.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/altspace/Public/caal</string>
+  <key>UserName</key>
+  <string>altspace</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/altspace</string>
+    <key>PATH</key>
+    <string>/Users/altspace/.local/node/bin:/Users/altspace/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/altspace/Public/caal/.native/logs/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/altspace/Public/caal/.native/logs/launchd.error.log</string>
+</dict>
+</plist>
