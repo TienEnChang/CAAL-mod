@@ -9,7 +9,11 @@ from .memory_tool import (
     MemoryTools,
     execute_memory_short,
 )
-from .n8n import discover_n8n_workflows, execute_n8n_workflow
+from .n8n import (
+    discover_n8n_workflows,
+    execute_n8n_workflow,
+    mcp_url_to_base_url,
+)
 from .web_search import WEB_SEARCH_TOOL_DEF, WebSearchTools, execute_web_search
 
 __all__ = [
@@ -21,6 +25,7 @@ __all__ = [
     "execute_web_search",
     "initialize_mcp_servers",
     "load_mcp_config",
+    "mcp_url_to_base_url",
     "MCPServerConfig",
     "MEMORY_SHORT_TOOL_DEF",
     "MemoryTools",

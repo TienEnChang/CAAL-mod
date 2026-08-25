@@ -189,22 +189,79 @@ The announce call:
 
 ## n8n Setup
 
-### Enable MCP Server
+You can point CAAL at an n8n you already run, or let the native launcher host
+one for you.
 
-1. Open n8n **Settings**
-2. Go to **MCP Access**
-3. Enable MCP
-4. Set connection method to **Access Token**
-5. Copy the token
+### Option A: Host n8n with the native runtime
+
+`start-native.sh` can run n8n as a managed service alongside the other native
+services. It installs into `.native/` and never touches a system-wide Node.
+
+```bash
+./start-native.sh --install-n8n
+```
+
+This downloads a dedicated Node runtime (n8n requires a newer Node than the
+CAAL frontend uses) plus n8n itself, then generates an encryption key at
+`.native/config/n8n-encryption-key`. Keep that file — it decrypts every
+credential you store in n8n.
+
+Once installed, n8n starts automatically with the rest of the stack:
+
+```bash
+./start-native.sh
+```
+
+| Detail | Value |
+|--------|-------|
+| Editor | `http://127.0.0.1:5678` |
+| Data | `.native/data/n8n` |
+| Log | `.native/logs/n8n.log` (`./start-native.sh --logs n8n`) |
+| Port override | `CAAL_N8N_PORT` |
+| Skip n8n | `CAAL_N8N_ENABLED=false` |
+
+n8n binds to `127.0.0.1` only. Put it behind a reverse proxy with TLS and
+authentication before exposing it to a network.
+
+### Option B: Use an existing n8n
+
+Leave n8n uninstalled locally (`CAAL_N8N_ENABLED=false`) and set `N8N_MCP_URL`
+in `.env` to the remote instance's MCP endpoint.
+
+### Enable the MCP server
+
+This step happens in the n8n UI and cannot be automated:
+
+1. Open n8n **Settings > Instance-level MCP**
+2. Select **Enable MCP access** (requires owner or admin)
+3. Under **Connection details**, open the access token and copy it — later
+   visits only show a redacted value
+4. Under **Workflows exposed**, enable the workflows CAAL should see
+
+Only **published** workflows containing a webhook, form, schedule, or chat
+trigger are eligible. Instance-level MCP needs n8n 2.33.0 or newer; the
+launcher installs 2.36.7.
 
 ### Configure CAAL
 
-In CAAL's Settings Panel > Integrations > n8n:
+Put the token in `.env`:
 
-1. Enable n8n
-2. Enter your n8n host URL (e.g., `http://192.168.1.100:5678`)
-3. Paste the MCP access token
-4. Test the connection
+```
+N8N_MCP_TOKEN=<token from n8n>
+```
+
+When the native launcher hosts n8n it exports `N8N_MCP_URL` for you, so leave
+that blank. For a remote instance, set both.
+
+Alternatively use CAAL's Settings Panel > Integrations > n8n and enter the host
+URL and token there — settings values take priority over the environment, so
+set both fields together or neither.
+
+Restart the agent to pick up the change:
+
+```bash
+./start-native.sh --restart agent
+```
 
 ---
 
@@ -217,6 +274,9 @@ In CAAL's Settings Panel > Integrations > n8n:
 | Empty response | Ensure Code node returns `{message: "...", data: ...}` |
 | Webhook 404 | Verify workflow name matches webhook path exactly |
 | Timeout | Use async pattern for long-running tasks |
+| No tools discovered | Confirm the token is set and the workflow is exposed under Settings > Instance-level MCP |
+| n8n won't start | Check `.native/logs/n8n.log`; port 5678 may already be in use (`CAAL_N8N_PORT`) |
+| Credentials fail after reinstall | `.native/config/n8n-encryption-key` must match the one that encrypted them |
 
 ### Reload Tools
 

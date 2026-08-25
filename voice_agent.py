@@ -62,6 +62,7 @@ from caal.integrations import (  # noqa: E402
     discover_n8n_workflows,
     initialize_mcp_servers,
     load_mcp_config,
+    mcp_url_to_base_url,
 )
 from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
@@ -345,10 +346,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             # Extract base URL from n8n MCP server config
             n8n_config = next((c for c in mcp_configs if c.name == "n8n"), None)
             if n8n_config:
-                # URL format: http://HOST:PORT/mcp-server/http
-                # Base URL: http://HOST:PORT
-                url_parts = n8n_config.url.rsplit("/", 2)
-                n8n_base_url = url_parts[0] if len(url_parts) >= 2 else n8n_config.url
+                n8n_base_url = mcp_url_to_base_url(n8n_config.url)
 
             n8n_workflow_tools, n8n_workflow_name_map = await discover_n8n_workflows(
                 n8n_mcp, n8n_base_url

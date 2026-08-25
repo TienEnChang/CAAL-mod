@@ -6,6 +6,7 @@
 #   ./start-native.sh --models              Run Qwen + speech services only
 #   ./start-native.sh --app                 Run app services; reuse healthy models
 #   ./start-native.sh --restart <service>   Restart one service in place
+#   ./start-native.sh --install-n8n         Install the bundled n8n runtime
 #   ./start-native.sh --stop                Stop all native services
 #   ./start-native.sh --status              Show service status
 #   ./start-native.sh --attach [mode]       Attach to the persistent supervisor
@@ -45,6 +46,16 @@ NODE_BIN="${CAAL_NODE_BIN:-/Users/altspace/.local/node/bin/node}"
 NEXT_STANDALONE="$PROJECT_DIR/frontend/.next/standalone"
 NEXT_SERVER="$NEXT_STANDALONE/server.js"
 
+# n8n needs a newer Node than the frontend runtime, so it gets its own.
+N8N_NODE_DIR="$RUNTIME_DIR/node"
+N8N_NODE_BIN="${CAAL_N8N_NODE_BIN:-$N8N_NODE_DIR/bin/node}"
+N8N_NODE_VERSION="${CAAL_N8N_NODE_VERSION:-v24.19.0}"
+N8N_VERSION="${CAAL_N8N_VERSION:-2.36.7}"
+N8N_PREFIX="$RUNTIME_DIR/n8n"
+N8N_BIN="$N8N_PREFIX/node_modules/n8n/bin/n8n"
+N8N_DATA_DIR="$DATA_DIR/n8n"
+N8N_KEY_FILE="$CONFIG_DIR/n8n-encryption-key"
+
 QWEN_MODEL="${CAAL_QWEN_MODEL:-mlx-community/Qwen3-4B-Instruct-2507-4bit}"
 QWEN_PORT="${CAAL_QWEN_PORT:-8100}"
 SPEECH_PORT="${CAAL_SPEECH_PORT:-8001}"
@@ -52,10 +63,28 @@ LIVEKIT_PORT="${CAAL_LIVEKIT_PORT:-7880}"
 LIVEKIT_RTC_TCP_PORT="${CAAL_LIVEKIT_RTC_TCP_PORT:-7881}"
 WEBHOOK_PORT="${CAAL_WEBHOOK_PORT:-8889}"
 FRONTEND_PORT="${CAAL_FRONTEND_PORT:-3000}"
+N8N_PORT="${CAAL_N8N_PORT:-5678}"
 
-ALL_SERVICES=(qwen speech livekit agent frontend)
+# auto: run n8n only once it has been installed via --install-n8n.
+N8N_ENABLED="${CAAL_N8N_ENABLED:-auto}"
+
+n8n_is_enabled() {
+  case "$N8N_ENABLED" in
+    false) return 1 ;;
+    true) return 0 ;;
+    *) [[ -f "$N8N_BIN" ]] ;;
+  esac
+}
+
+# n8n starts before the agent so workflow tools exist at discovery time.
+if n8n_is_enabled; then
+  ALL_SERVICES=(qwen speech n8n livekit agent frontend)
+  APP_SERVICES=(n8n livekit agent frontend)
+else
+  ALL_SERVICES=(qwen speech livekit agent frontend)
+  APP_SERVICES=(livekit agent frontend)
+fi
 MODEL_SERVICES=(qwen speech)
-APP_SERVICES=(livekit agent frontend)
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$SUPERVISOR_DIR"
 
@@ -67,7 +96,8 @@ Commands:
   (no arguments)              Start and supervise every service
   --models                    Start and supervise Qwen, Whisper, and Kokoro
   --app                       Start LiveKit, agent, and frontend using healthy models
-  --restart <service>         Restart qwen, speech, livekit, agent, or frontend
+  --restart <service>         Restart qwen, speech, n8n, livekit, agent, or frontend
+  --install-n8n               Install the bundled n8n runtime for workflow tools
   --stop                      Stop every native service
   --status                    Show service PIDs and detect untracked CAAL processes
   --attach [all|models|app]   Attach to a persistent supervisor (all by default)
@@ -88,6 +118,12 @@ Port overrides:
   CAAL_LIVEKIT_RTC_TCP_PORT   LiveKit RTC fallback TCP ($LIVEKIT_RTC_TCP_PORT)
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
+  CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
+
+n8n workflow tools:
+  CAAL_N8N_ENABLED            auto (run once installed), true, or false
+  CAAL_N8N_VERSION            n8n release to install ($N8N_VERSION)
+  Editor: http://127.0.0.1:$N8N_PORT — see docs/N8N-WORKFLOWS.md for setup
 EOF
 }
 
@@ -166,7 +202,7 @@ stop_tmux_sessions() {
 
 is_service() {
   case "$1" in
-    qwen|speech|livekit|agent|frontend) return 0 ;;
+    qwen|speech|n8n|livekit|agent|frontend) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -213,6 +249,7 @@ service_port() {
   case "$1" in
     qwen) echo "$QWEN_PORT" ;;
     speech) echo "$SPEECH_PORT" ;;
+    n8n) echo "$N8N_PORT" ;;
     livekit) echo "$LIVEKIT_PORT" ;;
     agent) echo "$WEBHOOK_PORT" ;;
     frontend) echo "$FRONTEND_PORT" ;;
@@ -223,6 +260,7 @@ service_url() {
   case "$1" in
     qwen) echo "http://127.0.0.1:$QWEN_PORT/v1/models" ;;
     speech) echo "http://127.0.0.1:$SPEECH_PORT/health" ;;
+    n8n) echo "http://127.0.0.1:$N8N_PORT/healthz" ;;
     livekit) echo "http://127.0.0.1:$LIVEKIT_PORT" ;;
     agent) echo "http://127.0.0.1:$WEBHOOK_PORT/health" ;;
     frontend) echo "http://127.0.0.1:$FRONTEND_PORT" ;;
@@ -244,6 +282,7 @@ pid_matches_service() {
   case "$name:$command" in
     qwen:*mlx_lm*server*) return 0 ;;
     speech:*local_speech_server.py*) return 0 ;;
+    n8n:*n8n/bin/n8n*) return 0 ;;
     livekit:*livekit-server*) return 0 ;;
     agent:*voice_agent.py*start*) return 0 ;;
     frontend:*standalone/server.js*|frontend:*next-server*) return 0 ;;
@@ -302,7 +341,7 @@ stop_services() {
 }
 
 stop_all() {
-  stop_services frontend agent livekit speech qwen
+  stop_services frontend agent livekit n8n speech qwen
 }
 
 status_one() {
@@ -344,6 +383,10 @@ validate_service_dependency() {
     speech)
       ensure_mlx_speech_environment
       executable="$SPEECH_PYTHON"
+      ;;
+    n8n)
+      require_n8n_installed
+      executable="$N8N_NODE_BIN"
       ;;
     livekit) executable="$LIVEKIT_BIN" ;;
     agent) executable="$AGENT_PYTHON" ;;
@@ -387,6 +430,53 @@ ensure_mlx_speech_environment() {
   "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_SPEECH_VENV"
   "$UV_BIN" pip install --python "$SPEECH_PYTHON" \
     -r "$PROJECT_DIR/requirements-mlx-speech.txt"
+}
+
+require_n8n_installed() {
+  [[ -f "$N8N_BIN" && -x "$N8N_NODE_BIN" ]] && return 0
+  echo "n8n is not installed. Install it with: ./start-native.sh --install-n8n" >&2
+  echo "Or skip it for this run with: CAAL_N8N_ENABLED=false ./start-native.sh" >&2
+  return 1
+}
+
+install_n8n_node() {
+  local url archive
+  [[ -x "$N8N_NODE_BIN" ]] && return 0
+
+  # n8n requires a newer Node than the frontend uses, so keep it self-contained.
+  url="https://nodejs.org/dist/$N8N_NODE_VERSION/node-$N8N_NODE_VERSION-darwin-arm64.tar.gz"
+  archive="$RUNTIME_DIR/node-$N8N_NODE_VERSION.tar.gz"
+  echo "Downloading Node $N8N_NODE_VERSION for n8n..."
+  curl -fsSL "$url" -o "$archive"
+  mkdir -p "$N8N_NODE_DIR"
+  tar -xzf "$archive" -C "$N8N_NODE_DIR" --strip-components=1
+  rm -f "$archive"
+}
+
+install_n8n() {
+  install_n8n_node
+  echo "Installing n8n $N8N_VERSION (this downloads several hundred MB)..."
+  mkdir -p "$N8N_PREFIX"
+  # n8n pulls a very large dependency tree, so allow slow registry reads
+  # rather than failing the whole install on one timeout.
+  PATH="$N8N_NODE_DIR/bin:$PATH" "$N8N_NODE_DIR/bin/npm" install \
+    --prefix "$N8N_PREFIX" "n8n@$N8N_VERSION" \
+    --omit=dev --no-audit --no-fund \
+    --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=600000
+  [[ -f "$N8N_BIN" ]] || {
+    echo "n8n install finished but $N8N_BIN is missing" >&2
+    return 1
+  }
+  ensure_n8n_encryption_key
+  echo "n8n installed. Start it with: ./start-native.sh"
+}
+
+ensure_n8n_encryption_key() {
+  [[ -s "$N8N_KEY_FILE" ]] && return 0
+  # Persisted so stored workflow credentials survive restarts.
+  umask 077
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48 >"$N8N_KEY_FILE"
+  chmod 600 "$N8N_KEY_FILE"
 }
 
 prepare_frontend() {
@@ -551,6 +641,27 @@ start_named() {
         SPEECH_HOST="127.0.0.1" SPEECH_PORT="$SPEECH_PORT" \
         "$SPEECH_PYTHON" "$PROJECT_DIR/local_speech_server.py"
       ;;
+    n8n)
+      ensure_n8n_encryption_key
+      mkdir -p "$N8N_DATA_DIR"
+      echo "Starting n8n → http://127.0.0.1:$N8N_PORT"
+      start_service n8n env \
+        N8N_USER_FOLDER="$N8N_DATA_DIR" \
+        N8N_PORT="$N8N_PORT" \
+        N8N_LISTEN_ADDRESS="127.0.0.1" \
+        N8N_HOST="127.0.0.1" \
+        N8N_PROTOCOL="http" \
+        N8N_EDITOR_BASE_URL="http://127.0.0.1:$N8N_PORT/" \
+        WEBHOOK_URL="http://127.0.0.1:$N8N_PORT/" \
+        N8N_ENCRYPTION_KEY="$(<"$N8N_KEY_FILE")" \
+        N8N_DIAGNOSTICS_ENABLED="false" \
+        N8N_VERSION_NOTIFICATIONS_ENABLED="false" \
+        N8N_SECURE_COOKIE="false" \
+        N8N_RUNNERS_ENABLED="true" \
+        GENERIC_TIMEZONE="${CAAL_TIMEZONE:-Asia/Taipei}" \
+        PATH="$N8N_NODE_DIR/bin:$PATH" \
+        "$N8N_NODE_BIN" "$N8N_BIN" start
+      ;;
     livekit)
       echo "Starting LiveKit → ws://127.0.0.1:$LIVEKIT_PORT"
       start_service livekit "$LIVEKIT_BIN" --dev --bind 127.0.0.1 \
@@ -639,7 +750,7 @@ cleanup_models() {
 
 cleanup_app() {
   trap - EXIT
-  stop_services frontend agent livekit >/dev/null 2>&1 || true
+  stop_services frontend agent livekit n8n >/dev/null 2>&1 || true
   unregister_supervisor app
 }
 
@@ -649,6 +760,7 @@ validate_port CAAL_LIVEKIT_PORT "$LIVEKIT_PORT"
 validate_port CAAL_LIVEKIT_RTC_TCP_PORT "$LIVEKIT_RTC_TCP_PORT"
 validate_port CAAL_WEBHOOK_PORT "$WEBHOOK_PORT"
 validate_port CAAL_FRONTEND_PORT "$FRONTEND_PORT"
+validate_port CAAL_N8N_PORT "$N8N_PORT"
 
 [[ -f "$CONFIG_DIR/settings.json" ]] || cp settings.native.default.json "$CONFIG_DIR/settings.json"
 [[ -f mcp_servers.json ]] || cp mcp_servers.default.json mcp_servers.json
@@ -676,6 +788,12 @@ export TTS_VOICE="${CAAL_KOKORO_VOICE:-af_heart}"
 export TIMEZONE="${CAAL_TIMEZONE:-Asia/Taipei}"
 export TIMEZONE_DISPLAY="${CAAL_TIMEZONE_DISPLAY:-Taipei Time}"
 
+# Point the agent at the local n8n MCP endpoint. N8N_MCP_TOKEN stays in .env,
+# which load_dotenv reads without overriding what is exported here.
+if n8n_is_enabled; then
+  export N8N_MCP_URL="${N8N_MCP_URL:-http://127.0.0.1:$N8N_PORT/mcp-server/http}"
+fi
+
 if [[ "$TMUX_CHILD" != true ]]; then
   case "${1:-}" in
     "")
@@ -693,7 +811,7 @@ if [[ "$TMUX_CHILD" != true ]]; then
     --restart)
       restart_service="${2:-}"
       is_service "$restart_service" || {
-        echo "Usage: ./start-native.sh --restart <qwen|speech|livekit|agent|frontend>" >&2
+        echo "Usage: ./start-native.sh --restart <qwen|speech|n8n|livekit|agent|frontend>" >&2
         exit 2
       }
       if restart_in_tmux "$restart_service"; then
@@ -706,6 +824,10 @@ fi
 case "${1:-}" in
   --help|-h)
     usage
+    exit 0
+    ;;
+  --install-n8n)
+    install_n8n
     exit 0
     ;;
   --stop)
@@ -755,7 +877,7 @@ case "${1:-}" in
   --restart)
     restart_service="${2:-}"
     is_service "$restart_service" || {
-      echo "Usage: ./start-native.sh --restart <qwen|speech|livekit|agent|frontend>" >&2
+      echo "Usage: ./start-native.sh --restart <qwen|speech|n8n|livekit|agent|frontend>" >&2
       exit 2
     }
     stop_one "$restart_service"

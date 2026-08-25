@@ -266,6 +266,32 @@ def sanitize_tool_name(name: str) -> str:
     return name.lower().replace(" ", "_").replace("-", "_")
 
 
+# MCP endpoint suffixes, longest first so /mcp-server/http wins over /mcp-server.
+_MCP_URL_SUFFIXES = ("/mcp-server/http", "/mcp-server/sse", "/mcp-server")
+
+
+def mcp_url_to_base_url(mcp_url: str) -> str:
+    """Derive the n8n base URL from its MCP endpoint URL.
+
+    Webhooks are served from the instance root while MCP lives under
+    /mcp-server, so that suffix is stripped:
+
+        http://127.0.0.1:5678/mcp-server/http -> http://127.0.0.1:5678
+
+    Only the known suffixes are removed, which keeps instances hosted
+    under a path prefix intact:
+
+        https://example.com/n8n/mcp-server/http -> https://example.com/n8n
+
+    Any other URL is returned unchanged apart from a trailing slash.
+    """
+    trimmed = mcp_url.strip().rstrip("/")
+    for suffix in _MCP_URL_SUFFIXES:
+        if trimmed.endswith(suffix):
+            return trimmed[: -len(suffix)]
+    return trimmed
+
+
 def clear_caches() -> None:
     """Clear all n8n workflow caches for hot reload.
 

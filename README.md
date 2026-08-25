@@ -96,6 +96,16 @@ restart the app services independently in another:
 Use `./start-native.sh --help` for status, logs, stop commands, service names,
 and configurable port environment variables.
 
+To run n8n workflow tools natively, install the bundled n8n runtime once:
+
+```bash
+./start-native.sh --install-n8n
+```
+
+It then starts and stops with the rest of the stack, with the editor at
+`http://127.0.0.1:5678`. See [n8n Workflows](docs/N8N-WORKFLOWS.md) for
+enabling MCP access and connecting CAAL.
+
 ### HTTPS & Network
 
 HTTPS is enabled by default with auto-generated self-signed certificates. This is required because browsers block microphone access on non-`localhost` HTTP.

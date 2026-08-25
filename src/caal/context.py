@@ -24,6 +24,7 @@ from .integrations import (
     execute_memory_short,
     execute_web_search,
     initialize_mcp_servers,
+    mcp_url_to_base_url,
 )
 from .integrations.mcp_loader import MCPServerConfig
 
@@ -140,11 +141,7 @@ class ToolContext:
                     (c for c in self._mcp_configs if c.name == "n8n"), None
                 )
                 if n8n_config:
-                    # URL format: http://HOST:PORT/mcp-server/http → http://HOST:PORT
-                    url_parts = n8n_config.url.rsplit("/", 2)
-                    self._n8n_base_url = (
-                        url_parts[0] if len(url_parts) >= 2 else n8n_config.url
-                    )
+                    self._n8n_base_url = mcp_url_to_base_url(n8n_config.url)
 
                     workflows, name_map = await discover_n8n_workflows(
                         n8n_mcp, self._n8n_base_url

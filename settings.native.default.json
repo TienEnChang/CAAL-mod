@@ -19,7 +19,7 @@
   "hass_enabled": false,
   "hass_host": "",
   "hass_token": "",
-  "n8n_enabled": false,
+  "n8n_enabled": true,
   "n8n_url": "",
   "n8n_token": "",
   "n8n_api_key": "",
