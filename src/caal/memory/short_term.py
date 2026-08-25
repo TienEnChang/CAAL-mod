@@ -191,8 +191,11 @@ class ShortTermMemory:
 
         now = time.time()
         lines = [
-            "[INTERNAL CONTEXT - DO NOT read aloud or announce. "
-            "Use silently when relevant to the conversation.]"
+            "[USER MEMORY - Every entry below belongs to the user and describes "
+            "the user's facts, preferences, or task context. These entries never "
+            "describe the assistant's identity, traits, preferences, or experiences. "
+            "Interpret 'you' inside a value as referring to the user. Use silently "
+            "when relevant and do not read aloud unless the user asks.]"
         ]
 
         for key, entry in self._cache["entries"].items():
@@ -223,7 +226,10 @@ class ShortTermMemory:
             else:
                 expiry_info = ", no expiry"
 
-            lines.append(f"- {key}: {value_str} (source: {source}{expiry_info})")
+            lines.append(
+                f'- User memory "{key}": {value_str} '
+                f"(source: {source}{expiry_info})"
+            )
 
         return "\n".join(lines)
 

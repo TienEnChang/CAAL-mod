@@ -29,8 +29,9 @@ MEMORY_SHORT_TOOL_DEF: dict = {
     "function": {
         "name": "memory_short",
         "description": (
-            "Short-term memory — store and recall "
-            "key-value pairs during a session.\n"
+            "The user's short-term memory — store and recall "
+            "facts, preferences, and task context that belong to the user. "
+            "Memory entries never describe the assistant.\n"
             "\n"
             "Actions:\n"
             "  store — save a value.\n"
@@ -39,6 +40,8 @@ MEMORY_SHORT_TOOL_DEF: dict = {
             "  delete — remove a stored value.\n"
             "\n"
             "Rules:\n"
+            "- Always attribute recalled entries to the user, never to yourself.\n"
+            "- Interpret second-person wording inside a value as describing the user.\n"
             "- Use descriptive key names "
             "(e.g. flight, email, dentist).\n"
             "- Default TTL is 7 days.\n"
@@ -145,7 +148,7 @@ async def execute_memory_short(
             ttl_seconds=ttl_seconds,
             source="explicit",
         )
-        return f"Stored: {key}"
+        return f"Stored user memory: {key}"
 
     elif action in ("get", "recall"):
         if not key:
@@ -153,25 +156,29 @@ async def execute_memory_short(
 
         result = memory.get(key)
         if result is None:
-            return f"No value found for key: {key}"
+            return f"No user memory found for key: {key}"
 
         if isinstance(result, (dict, list)):
-            return json.dumps(result)
-        return str(result)
+            result = json.dumps(result)
+        return f'User memory "{key}": {result}'
 
     elif action == "delete":
         if not key:
             return "Key is required for delete action"
 
         deleted = memory.delete(key)
-        return f"Deleted: {key}" if deleted else f"Key not found: {key}"
+        return (
+            f"Deleted user memory: {key}"
+            if deleted
+            else f"User memory key not found: {key}"
+        )
 
     elif action == "list":
         entries = memory.list_keys()
         if not entries:
-            return "Memory is empty"
+            return "User memory is empty"
 
-        lines = ["Stored memory keys:"]
+        lines = ["Stored user memory keys (all entries describe the user):"]
         for entry in entries:
             lines.append(f"- {entry['key']} (source: {entry['source']})")
         return "\n".join(lines)
@@ -184,7 +191,7 @@ async def execute_memory_short(
 
 
 class MemoryTools:
-    """Mixin providing memory_short tool for explicit memory operations.
+    """Mixin providing memory_short tool for explicit user-memory operations.
 
     Requires the parent class to have:
     - self._short_term_memory: ShortTermMemory instance
@@ -198,10 +205,14 @@ class MemoryTools:
         value: str = "",
         ttl: str = "",
     ) -> str:
-        """Store or retrieve information for later use in this conversation.
+        """Store or retrieve information that belongs to the user.
 
         Use this to remember things the user tells you like flight numbers,
         tracking codes, preferences, or any data you'll need to reference later.
+        Every stored entry describes the user's facts, preferences, or task
+        context, never your own identity, traits, preferences, or experiences.
+        Always attribute recalled information to the user. Interpret "you" in a
+        stored value as referring to the user, not yourself.
 
         IMPORTANT: Before asking the user for information you've already
         discussed (like a tracking number or flight), check memory first
