@@ -60,6 +60,12 @@ N8N_KEY_FILE="$CONFIG_DIR/n8n-encryption-key"
 
 QWEN_MODEL="${CAAL_QWEN_MODEL:-mlx-community/Qwen3-4B-Instruct-2507-4bit}"
 QWEN_PORT="${CAAL_QWEN_PORT:-8100}"
+# The system prompt embeds the current wall-clock minute, so every agent job
+# starts a KV-cache branch no later job can reuse. mlx-lm retains 10 of these by
+# default, which is how qwen grew ~0.5 GiB per call. Retaining one evicts the
+# previous call's dead branch on the next insert; within-call reuse is
+# unaffected, since successive turns extend the same branch.
+QWEN_PROMPT_CACHE_SIZE="${CAAL_QWEN_PROMPT_CACHE_SIZE:-1}"
 SPEECH_PORT="${CAAL_SPEECH_PORT:-8001}"
 LIVEKIT_PORT="${CAAL_LIVEKIT_PORT:-7880}"
 LIVEKIT_RTC_TCP_PORT="${CAAL_LIVEKIT_RTC_TCP_PORT:-7881}"
@@ -122,6 +128,7 @@ Persistent runtime:
 
 Port overrides:
   CAAL_QWEN_PORT              Qwen OpenAI-compatible API ($QWEN_PORT)
+  CAAL_QWEN_PROMPT_CACHE_SIZE Qwen KV caches retained ($QWEN_PROMPT_CACHE_SIZE)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
   CAAL_MLX_PYTHON             Existing Python environment with mlx-lm
   CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
@@ -726,7 +733,8 @@ start_named() {
     qwen)
       echo "Starting Qwen: $QWEN_MODEL → http://127.0.0.1:$QWEN_PORT/v1"
       start_service qwen "$MODEL_PYTHON" -m mlx_lm server \
-        --model "$QWEN_MODEL" --host 127.0.0.1 --port "$QWEN_PORT"
+        --model "$QWEN_MODEL" --host 127.0.0.1 --port "$QWEN_PORT" \
+        --prompt-cache-size "$QWEN_PROMPT_CACHE_SIZE"
       ;;
     speech)
       echo "Starting MLX Whisper + MLX Kokoro → http://127.0.0.1:$SPEECH_PORT"

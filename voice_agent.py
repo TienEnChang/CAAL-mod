@@ -66,6 +66,7 @@ from caal.integrations import (  # noqa: E402
 )
 from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
+from caal.memory_guard import guard_loop  # noqa: E402
 from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
 
@@ -845,8 +846,33 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     logger.info("Agent ready - listening for speech...")
 
-    # Wait until session closes (room disconnects, etc.)
-    await close_event.wait()
+    # ==========================================================================
+    # Memory guard
+    # ==========================================================================
+    # A live call's KV cache is bounded by nothing - it grows with the
+    # conversation until the machine swaps. Rather than truncate context
+    # mid-call (which would quietly change what the assistant remembers), end
+    # the call and let the next one start fresh from rehydrated history.
+
+    async def _end_call_for_memory(reason: str) -> None:
+        logger.warning(f"Ending call under memory pressure: {reason}")
+        try:
+            await session.say(
+                "I'm running low on memory, so I'll end here. "
+                "Start a new call and I'll pick up where we left off.",
+                add_to_chat_ctx=False,
+            )
+        except Exception as e:
+            logger.warning(f"Could not announce memory shutdown: {e}")
+        close_event.set()
+
+    memory_guard_task = asyncio.create_task(guard_loop(_end_call_for_memory))
+
+    # Wait until session closes (room disconnects, memory pressure, etc.)
+    try:
+        await close_event.wait()
+    finally:
+        memory_guard_task.cancel()
     # Returning from the entrypoint does not finalize a LiveKit job. Explicitly
     # shut it down so its agent participant leaves the room before the desktop
     # reconnects for a different conversation. Otherwise the stale participant
