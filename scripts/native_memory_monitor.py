@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import signal
@@ -28,7 +29,24 @@ SERVICE_MARKERS = {
     "agent": ("voice_agent.py", "start"),
     "frontend": ("next-server",),
 }
+# Absolute paths: services run with a PATH that omits /usr/sbin, so a bare
+# "sysctl" raised FileNotFoundError - which _run does not catch - wiping out the
+# whole system-metrics block and leaving every background sample empty.
+MEMORY_PRESSURE_BIN = "/usr/bin/memory_pressure"
+SYSCTL_BIN = "/usr/sbin/sysctl"
+GIB = 1024**3
 DEFAULT_SAMPLE_SECONDS = 60
+# Last-resort backstop, deliberately far above the in-session guard's 1 GiB
+# swap-growth trip. That guard polls every 2s, ends the session and releases the
+# cache; this samples once a minute and restarts Qwen outright. Matching
+# thresholds would mean both firing on one event, with this one arriving up to a
+# minute late - likely during a fresh call the guard had already rescued. It
+# should only act on pressure the session guard failed to contain, or that built
+# up with no call running at all.
+DEFAULT_SWAP_RESTART_GIB = 3.0
+# Swap is released lazily, so the baseline cannot be trusted immediately after a
+# restart; this keeps one restart from cascading into a loop.
+DEFAULT_RESTART_COOLDOWN_SECONDS = 300
 DEFAULT_DEEP_SECONDS = 300
 DEFAULT_MAX_LOG_BYTES = 20 * 1024 * 1024
 PROMPT_CACHE_RE = re.compile(
@@ -192,15 +210,15 @@ def _service_processes(
 def _system_metrics() -> dict[str, int | float]:
     metrics: dict[str, int | float] = {}
     try:
-        metrics.update(parse_swapusage(_run(["sysctl", "vm.swapusage"])))
-    except (MonitorError, subprocess.TimeoutExpired):
+        metrics.update(parse_swapusage(_run([SYSCTL_BIN, "vm.swapusage"])))
+    except (MonitorError, subprocess.TimeoutExpired, OSError):
         pass
     try:
-        pressure = _run(["memory_pressure"])
+        pressure = _run([MEMORY_PRESSURE_BIN])
         match = re.search(r"System-wide memory free percentage:\s*(\d+)%", pressure)
         if match:
             metrics["memory_free_percent"] = int(match.group(1))
-    except (MonitorError, subprocess.TimeoutExpired):
+    except (MonitorError, subprocess.TimeoutExpired, OSError):
         pass
     return metrics
 
@@ -276,14 +294,91 @@ def _append_record(path: Path, record: dict[str, Any], max_bytes: int) -> None:
         output.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+class SwapWatchdog:
+    """Decides when Qwen should be restarted to reclaim its memory.
+
+    Growth is measured against a baseline rather than an absolute ceiling:
+    macOS retains swap long after the pressure that caused it, so an absolute
+    limit would fire forever on a machine that swapped once.
+    """
+
+    def __init__(self, threshold_bytes: int, cooldown_seconds: int) -> None:
+        self.threshold_bytes = threshold_bytes
+        self.cooldown_seconds = cooldown_seconds
+        self.baseline: int | None = None
+        self.last_restart: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.threshold_bytes > 0
+
+    def growth(self, swap_used: int) -> int:
+        if self.baseline is None:
+            return 0
+        return swap_used - self.baseline
+
+    def should_restart(self, swap_used: int | None, now: float) -> bool:
+        if not self.enabled or swap_used is None:
+            return False
+        if self.baseline is None:
+            self.baseline = swap_used
+            return False
+        growth = swap_used - self.baseline
+        if growth < 0:
+            # Swap was released; track the new floor.
+            self.baseline = swap_used
+            return False
+        if growth <= self.threshold_bytes:
+            return False
+        if self.last_restart is not None and now - self.last_restart < self.cooldown_seconds:
+            return False
+        return True
+
+    def restarted(self, now: float) -> None:
+        self.last_restart = now
+        # Swap drains lazily, so re-baseline from the next reading rather than
+        # measuring against a floor that no longer reflects reality.
+        self.baseline = None
+
+
+def _restart_qwen(project: Path) -> bool:
+    """Restart the Qwen service, returning whether it succeeded."""
+    script = project / "start-native.sh"
+    if not script.exists():
+        logging.error("Cannot restart qwen: %s is missing", script)
+        return False
+    try:
+        result = subprocess.run(
+            [str(script), "--restart", "qwen"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logging.error("Restarting qwen failed: %s", error)
+        return False
+    if result.returncode != 0:
+        logging.error(
+            "Restarting qwen exited %s: %s",
+            result.returncode,
+            (result.stderr or result.stdout).strip()[:200],
+        )
+        return False
+    return True
+
+
 def monitor(
     project: Path,
     log_path: Path,
     sample_seconds: int,
     deep_seconds: int,
     max_log_bytes: int,
+    swap_restart_bytes: int = 0,
+    restart_cooldown: int = DEFAULT_RESTART_COOLDOWN_SECONDS,
 ) -> None:
     stopping = False
+    watchdog = SwapWatchdog(swap_restart_bytes, restart_cooldown)
 
     def stop(_signum: int, _frame: Any) -> None:
         nonlocal stopping
@@ -301,6 +396,21 @@ def monitor(
             if deep and record["services"]:
                 last_deep = started
             _append_record(log_path, record, max_log_bytes)
+
+            swap_used = record.get("system", {}).get("swap_used_bytes")
+            if watchdog.should_restart(swap_used, started):
+                growth = watchdog.growth(swap_used)
+                logging.warning(
+                    "Swap grew %.2f GiB (limit %.2f GiB) - restarting qwen",
+                    growth / GIB,
+                    swap_restart_bytes / GIB,
+                )
+                record["swap_restart"] = {
+                    "growth_bytes": growth,
+                    "restarted": _restart_qwen(project),
+                }
+                _append_record(log_path, record, max_log_bytes)
+                watchdog.restarted(time.monotonic())
         except Exception as exc:
             _append_record(
                 log_path,
@@ -430,6 +540,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     monitor_parser.add_argument("--deep-seconds", type=int, default=DEFAULT_DEEP_SECONDS)
     monitor_parser.add_argument("--max-log-bytes", type=int, default=DEFAULT_MAX_LOG_BYTES)
+    monitor_parser.add_argument(
+        "--swap-restart-gb",
+        type=float,
+        default=DEFAULT_SWAP_RESTART_GIB,
+        help=(
+            "Backstop: restart qwen once swap grows this far above its baseline "
+            "(0 disables). Well above the in-session guard's own trip."
+        ),
+    )
+    monitor_parser.add_argument(
+        "--restart-cooldown", type=int, default=DEFAULT_RESTART_COOLDOWN_SECONDS
+    )
     subparsers.add_parser("sample")
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--hours", type=float, default=24)
@@ -448,6 +570,8 @@ def main() -> int:
                 max(5, args.sample_seconds),
                 max(30, args.deep_seconds),
                 max(1024 * 1024, args.max_log_bytes),
+                swap_restart_bytes=int(max(0.0, args.swap_restart_gb) * GIB),
+                restart_cooldown=max(0, args.restart_cooldown),
             )
         elif args.command == "sample":
             record = collect_sample(project, deep=True)
