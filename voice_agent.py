@@ -847,6 +847,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     # Wait until session closes (room disconnects, etc.)
     await close_event.wait()
+    # Returning from the entrypoint does not finalize a LiveKit job. Explicitly
+    # shut it down so its agent participant leaves the room before the desktop
+    # reconnects for a different conversation. Otherwise the stale participant
+    # prevents a replacement job from being dispatched and receives chat streams
+    # without an AgentSession callback.
+    ctx.shutdown("agent session closed")
 
 
 # =============================================================================

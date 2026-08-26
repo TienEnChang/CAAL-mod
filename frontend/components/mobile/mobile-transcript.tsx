@@ -1,7 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MobileControlSnapshot } from '@/lib/mobile-control-store';
+import {
+  MicrophoneIcon,
+  MicrophoneSlashIcon,
+  PhoneCallIcon,
+  PhoneDisconnectIcon,
+} from '@phosphor-icons/react/dist/ssr';
+import type { DesktopControlAction, MobileControlSnapshot } from '@/lib/mobile-control-store';
 
 interface ConversationSummary {
   id: string;
@@ -24,9 +30,12 @@ type DisplayMessage = {
   content: string;
   createdAt: number;
   partial: boolean;
+  toolStatus?: 'running' | 'complete' | 'failed';
+  toolParams?: Record<string, unknown>[];
 };
 
 const OFFLINE_AFTER_MS = 25_000;
+const CREATE_CONVERSATION_VALUE = '__create_conversation__';
 
 async function responseJson<T>(response: Response): Promise<T> {
   const body = await response.json();
@@ -105,12 +114,23 @@ export function MobileTranscript() {
   const messages = useMemo<DisplayMessage[]>(() => {
     const byId = new Map<string, DisplayMessage>();
     for (const item of history) {
+      const persistedToolParams = item.metadata.tool_params;
       byId.set(item.id, {
         id: item.id,
         role: item.role,
         content: item.content,
         createdAt: item.created_at * 1000,
         partial: false,
+        toolStatus:
+          item.role === 'tool'
+            ? item.metadata.status === 'failed'
+              ? 'failed'
+              : 'complete'
+            : undefined,
+        toolParams:
+          item.role === 'tool' && Array.isArray(persistedToolParams)
+            ? (persistedToolParams as Record<string, unknown>[])
+            : undefined,
       });
     }
     for (const item of snapshot?.desktop.liveMessages ?? []) {
@@ -120,6 +140,8 @@ export function MobileTranscript() {
         content: item.content,
         createdAt: item.createdAt,
         partial: item.partial,
+        toolStatus: item.toolStatus,
+        toolParams: item.toolParams,
       });
     }
     return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -136,8 +158,12 @@ export function MobileTranscript() {
   const desktopOnline = Boolean(
     snapshot?.desktop.updatedAt && clock - snapshot.desktop.updatedAt < OFFLINE_AFTER_MS
   );
+  const desktopControllerReady = desktopOnline && snapshot?.desktop.controlProtocolVersion === 1;
   const desktopConnected = desktopOnline && Boolean(snapshot?.desktop.connected);
   const pendingConversationId = snapshot?.pendingConversationId ?? null;
+  const pendingControlCommand = snapshot?.pendingControlCommand ?? null;
+  const controlsBusy = Boolean(pendingConversationId || pendingControlCommand);
+  const microphoneEnabled = Boolean(snapshot?.desktop.microphoneEnabled);
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
 
   const selectConversation = async (conversationId: string) => {
@@ -160,13 +186,44 @@ export function MobileTranscript() {
     }
   };
 
+  const sendControl = async (action: DesktopControlAction, microphoneEnabled?: boolean) => {
+    try {
+      await responseJson(
+        await fetch('/api/mobile-control/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, microphoneEnabled }),
+        })
+      );
+      setError(null);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to control CAAL');
+    }
+  };
+
+  const pendingControlLabel =
+    pendingControlCommand?.action === 'create_conversation'
+      ? 'Creating session'
+      : pendingControlCommand?.action === 'start_call'
+        ? 'Starting call'
+        : pendingControlCommand?.action === 'end_call'
+          ? 'Ending call'
+          : pendingControlCommand?.action === 'set_microphone_enabled'
+            ? 'Updating microphone'
+            : null;
+
   const statusLabel = !desktopOnline
     ? 'Desktop offline'
-    : pendingConversationId
-      ? 'Switching session'
-      : desktopConnected
-        ? snapshot?.desktop.status || 'Connected'
-        : 'Desktop disconnected';
+    : !desktopControllerReady
+      ? 'Refresh desktop UI'
+      : pendingConversationId
+        ? 'Switching session'
+        : pendingControlLabel
+          ? pendingControlLabel
+          : desktopConnected
+            ? snapshot?.desktop.status || 'Connected'
+            : 'Desktop disconnected';
+  const visibleError = error ?? snapshot?.desktop.controlCommandError ?? null;
 
   return (
     <main className="bg-background text-foreground flex h-dvh flex-col overflow-hidden">
@@ -195,7 +252,7 @@ export function MobileTranscript() {
             </div>
           </div>
           <span className="border-border/70 bg-muted/40 rounded-full border px-3 py-1.5 font-mono text-[10px] tracking-wider uppercase">
-            Viewer
+            Controller
           </span>
         </div>
 
@@ -209,10 +266,17 @@ export function MobileTranscript() {
           <select
             id="mobile-conversation"
             value={pendingConversationId ?? activeConversationId ?? ''}
-            disabled={!desktopOnline || Boolean(pendingConversationId)}
-            onChange={(event) => void selectConversation(event.target.value)}
+            disabled={!desktopControllerReady || controlsBusy}
+            onChange={(event) => {
+              if (event.target.value === CREATE_CONVERSATION_VALUE) {
+                void sendControl('create_conversation');
+                return;
+              }
+              void selectConversation(event.target.value);
+            }}
             className="border-input bg-muted/40 text-foreground w-full rounded-xl border px-3 py-3 text-sm outline-none disabled:opacity-50"
           >
+            <option value={CREATE_CONVERSATION_VALUE}>＋ New session</option>
             {!activeConversationId && <option value="">Select a conversation</option>}
             {conversations.map((conversation) => (
               <option key={conversation.id} value={conversation.id}>
@@ -229,7 +293,7 @@ export function MobileTranscript() {
       </header>
 
       <div ref={transcriptRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
-        <div className="mx-auto max-w-2xl space-y-4 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        <div className="mx-auto max-w-2xl space-y-4 pb-6">
           {messages.length === 0 ? (
             <div className="text-muted-foreground grid min-h-[45vh] place-content-center text-center">
               <div>
@@ -254,7 +318,11 @@ export function MobileTranscript() {
               >
                 <div className="text-muted-foreground mb-1.5 flex items-center justify-between gap-3 font-mono text-[10px] tracking-wider uppercase">
                   <span>
-                    {message.role === 'user' ? 'You' : message.role === 'tool' ? 'Tool' : 'CAAL'}
+                    {message.role === 'user'
+                      ? 'You'
+                      : message.role === 'tool'
+                        ? `Tool · ${message.toolStatus ?? 'complete'}`
+                        : 'CAAL'}
                     {message.partial ? ' · listening' : ''}
                   </span>
                   <time>
@@ -265,17 +333,64 @@ export function MobileTranscript() {
                   </time>
                 </div>
                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                {message.role === 'tool' && message.toolParams?.length ? (
+                  <details className="border-border/50 mt-2 border-t pt-2">
+                    <summary className="text-muted-foreground cursor-pointer font-mono text-[10px] tracking-wider uppercase">
+                      Parameters
+                    </summary>
+                    <pre className="bg-background/50 text-muted-foreground mt-2 max-h-40 overflow-auto rounded-lg p-2 text-xs whitespace-pre-wrap">
+                      {JSON.stringify(message.toolParams, null, 2)}
+                    </pre>
+                  </details>
+                ) : null}
               </article>
             ))
           )}
         </div>
       </div>
 
-      {error && (
+      {visibleError && (
         <div className="border-border/70 bg-background/95 border-t px-4 py-2 text-center text-xs text-amber-300">
-          {error}
+          {visibleError}
         </div>
       )}
+
+      <footer className="border-border/70 bg-background/95 border-t px-4 pt-3 pb-[max(.75rem,env(safe-area-inset-bottom))] backdrop-blur">
+        <div className="mx-auto grid max-w-2xl grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={!desktopControllerReady || !desktopConnected || controlsBusy}
+            onClick={() => void sendControl('set_microphone_enabled', !microphoneEnabled)}
+            className="border-border bg-muted/40 hover:bg-muted/70 flex min-h-12 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+            aria-label={microphoneEnabled ? 'Mute desktop microphone' : 'Unmute desktop microphone'}
+          >
+            {microphoneEnabled ? (
+              <MicrophoneIcon className="size-4 shrink-0" weight="bold" />
+            ) : (
+              <MicrophoneSlashIcon className="size-4 shrink-0" weight="bold" />
+            )}
+            <span>{microphoneEnabled ? 'Mute' : 'Unmute'}</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={!desktopControllerReady || controlsBusy}
+            onClick={() => void sendControl(desktopConnected ? 'end_call' : 'start_call')}
+            className={`flex min-h-12 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+              desktopConnected
+                ? 'border-red-400/30 bg-red-400/10 text-red-300 hover:bg-red-400/20'
+                : 'border-primary bg-primary text-primary-foreground hover:bg-primary/90'
+            }`}
+          >
+            {desktopConnected ? (
+              <PhoneDisconnectIcon className="size-4 shrink-0" weight="bold" />
+            ) : (
+              <PhoneCallIcon className="size-4 shrink-0" weight="bold" />
+            )}
+            <span>{desktopConnected ? 'End call' : 'Start call'}</span>
+          </button>
+        </div>
+      </footer>
     </main>
   );
 }

@@ -96,6 +96,20 @@ restart the app services independently in another:
 Use `./start-native.sh --help` for status, logs, stop commands, service names,
 and configurable port environment variables.
 
+Native launchd installs continuously record lightweight system memory samples
+every minute and attributed macOS `footprint` samples every five minutes. The
+diagnostics separate Qwen, Whisper/Kokoro, agent workers, n8n, LiveKit, and the
+frontend; they also track Metal/IOAccelerator allocations, compressed or
+swapped pages, system swap, and Qwen prompt-cache growth. Inspect the last day:
+
+```bash
+./start-native.sh --memory-report 24
+```
+
+Use `./start-native.sh --memory-sample` for an immediate deep snapshot. Samples
+are kept in the ignored, rotating `.native/logs/memory.jsonl` file (20 MB plus
+one rotated generation), so no personal transcript or prompt content is logged.
+
 To run n8n workflow tools natively, install the bundled n8n runtime once:
 
 ```bash

@@ -9,6 +9,8 @@
 #   ./start-native.sh --install-n8n         Install the bundled n8n runtime
 #   ./start-native.sh --stop                Stop all native services
 #   ./start-native.sh --status              Show service status
+#   ./start-native.sh --memory-report [hrs] Show attributed RAM/Metal/swap growth
+#   ./start-native.sh --memory-sample       Record one deep memory snapshot
 #   ./start-native.sh --attach [mode]       Attach to the persistent supervisor
 #   ./start-native.sh --logs [service]      Follow one service log (agent by default)
 #   ./start-native.sh --help                Show commands and port overrides
@@ -108,6 +110,8 @@ Commands:
   --setup-remote              Show how to publish CAAL on your tailnet
   --stop                      Stop every native service
   --status                    Show service PIDs and detect untracked CAAL processes
+  --memory-report [hours]     Explain per-service RAM/Metal/swap growth (default: 24)
+  --memory-sample             Record and print one deep attributed snapshot
   --attach [all|models|app]   Attach to a persistent supervisor (all by default)
   --logs [service]            Follow a service log; defaults to agent
   --help                      Show this help
@@ -127,6 +131,8 @@ Port overrides:
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
   CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
+  CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
+  CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
 
 n8n workflow tools:
   CAAL_N8N_ENABLED            auto (run once installed), true, or false
@@ -937,6 +943,15 @@ case "${1:-}" in
     status_launchd
     status_remote_access
     exit 0
+    ;;
+  --memory-report)
+    report_hours="${2:-24}"
+    exec "$AGENT_PYTHON" "$PROJECT_DIR/scripts/native_memory_monitor.py" \
+      --project "$PROJECT_DIR" report --hours "$report_hours"
+    ;;
+  --memory-sample)
+    exec "$AGENT_PYTHON" "$PROJECT_DIR/scripts/native_memory_monitor.py" \
+      --project "$PROJECT_DIR" sample
     ;;
   --attach)
     attach_mode="${2:-all}"

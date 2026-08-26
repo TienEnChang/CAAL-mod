@@ -1,6 +1,14 @@
 'use client';
 
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { RoomEvent } from 'livekit-client';
 import { useSessionContext } from '@livekit/components-react';
 import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
@@ -27,7 +35,7 @@ interface ConversationContextValue {
   messages: PersistedMessage[];
   loading: boolean;
   error: string | null;
-  createConversation: () => Promise<void>;
+  createConversation: () => Promise<boolean>;
   selectConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<boolean>;
   deleteConversation: (id: string) => Promise<void>;
@@ -51,6 +59,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [messages, setMessages] = useState<PersistedMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const reconnectInFlightRef = useRef<Promise<void> | null>(null);
 
   const loadDetail = useCallback(async (id: string) => {
     const detail = await responseJson<{ messages: PersistedMessage[] }>(
@@ -113,14 +122,48 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   const reconnectAround = useCallback(
     async (action: () => Promise<string>) => {
-      const reconnect = session.isConnected;
-      if (reconnect) await session.end();
-      const selectedId = await action();
-      setActiveId(selectedId);
-      await refresh();
-      if (reconnect) {
-        await preferSystemDefaultMicrophone(session.room);
-        await session.start();
+      if (reconnectInFlightRef.current) {
+        await reconnectInFlightRef.current;
+        return;
+      }
+
+      const operation = (async () => {
+        const reconnect = session.isConnected;
+        if (reconnect) {
+          // Subscribe before ending the room. Awaiting end() alone can resume before
+          // useSession's React state has observed the disconnect. Calling start() in
+          // that gap makes its waitUntilDisconnected() miss the completed transition.
+          const disconnected = session.waitUntilDisconnected();
+          await session.end();
+          await disconnected;
+
+          // The connection endpoint deliberately reuses a fixed room name. Delete
+          // the old room explicitly so the next token always creates a fresh room
+          // and dispatch instead of racing LiveKit's departure timeout.
+          await responseJson(
+            await fetch('/api/session/reset', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+
+        const selectedId = await action();
+        setActiveId(selectedId);
+        await refresh();
+        if (reconnect) {
+          await preferSystemDefaultMicrophone(session.room);
+          await session.start();
+        }
+      })();
+
+      reconnectInFlightRef.current = operation;
+      try {
+        await operation;
+      } finally {
+        if (reconnectInFlightRef.current === operation) {
+          reconnectInFlightRef.current = null;
+        }
       }
     },
     [refresh, session]
@@ -139,10 +182,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         );
         return result.active_id;
       });
+      return true;
     } catch (requestError) {
       setError(
         requestError instanceof Error ? requestError.message : 'Unable to create conversation'
       );
+      return false;
     }
   }, [reconnectAround]);
 

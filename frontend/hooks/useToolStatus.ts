@@ -69,6 +69,7 @@ export function useToolActivities() {
 
   useEffect(() => {
     if (!room) return;
+    const handleDisconnected = () => setActivities([]);
     const handleDataReceived = (
       payload: Uint8Array,
       _participant: unknown,
@@ -99,8 +100,10 @@ export function useToolActivities() {
       }
     };
     room.on(RoomEvent.DataReceived, handleDataReceived);
+    room.on(RoomEvent.Disconnected, handleDisconnected);
     return () => {
       room.off(RoomEvent.DataReceived, handleDataReceived);
+      room.off(RoomEvent.Disconnected, handleDisconnected);
     };
   }, [room]);
 
