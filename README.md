@@ -109,20 +109,15 @@ Use `./start-native.sh --memory-sample` for an immediate deep snapshot. Samples
 are kept in the ignored, rotating `.native/logs/memory.jsonl` file (20 MB plus
 one rotated generation), so no personal transcript or prompt content is logged.
 
-During an active call the native agent watches three trip signals and ends the
-session if any one of them fires:
+During an active call the native agent watches two trip signals:
 
 - Qwen's own allocation reaching 6 GiB
-- less than 20% system memory available
-- more than 1 GiB of new swap since the session began
+- macOS entering its integrated critical memory-pressure state
 
-They are three views of one failure, not three separate protections. Only the
-first leads: MLX's allocation is measurable before the system reacts. Available
-memory lags, because evicting pages to swap *raises* the free percentage, so it
-reports the result of the pressure rather than its cause. Swap growth trails by
-definition and can confirm the failure but never prevent it. Measuring growth
-rather than absolute swap keeps old swap, which macOS retains long after the
-fact, from ending every new session.
+MLX allocation is the early, Qwen-specific boundary. The macOS signal comes
+from `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`, which integrates the VM system's
+reclaimable memory, compression and swapping decisions instead of making CAAL
+derive a second pressure policy from free RAM and swap.
 
 Prevention rests on the cap rather than the guard: Qwen is launched with its
 wired memory clamped to 6 GiB (`CAAL_QWEN_WIRED_LIMIT_GB`), well below the
@@ -130,10 +125,12 @@ wired memory clamped to 6 GiB (`CAAL_QWEN_WIRED_LIMIT_GB`), well below the
 unclamped Qwen makes room by evicting every other process to swap. Inside the
 cap it reclaims its own cache instead.
 
-On a trip the session is marked terminated, further turns are refused, the
-retained cache is released at once, and a new session waits for memory to
-recover before starting. An in-flight request is left to fail against the MLX
-ceiling, since mlx-lm cannot cancel one.
+At the MLX boundary the session is marked terminated, further turns are
+refused, and normal teardown clears the retained cache. If allocation does not
+fall below 4.5 GiB within 20 seconds, Qwen is restarted. At critical macOS
+pressure Qwen is restarted first so the room teardown and reconnect have enough
+memory to complete. In either case the desktop reconnects a fresh agent job to
+the same conversation and rehydrates its history.
 
 When a call ends, the agent asks the local Qwen server to drop the prompt cache
 that call built up. The system prompt embeds the current wall-clock minute, so a
@@ -142,6 +139,10 @@ teardown returns the memory immediately instead of holding it until the next
 call happens to evict it. Reuse *within* a call is unaffected. This only applies
 to a Qwen server on this machine - a remote OpenAI-compatible endpoint is left
 alone.
+
+The same teardown asks the local MLX speech bridge to clear reusable allocator
+buffers after STT and TTS finish. Whisper and Kokoro remain loaded, so the next
+call keeps the warm model baseline without retaining transient inference memory.
 
 To run n8n workflow tools natively, install the bundled n8n runtime once:
 

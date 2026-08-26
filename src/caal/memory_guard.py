@@ -1,96 +1,83 @@
-"""Trip signals that end a chat session before Qwen exhausts the machine.
+"""End a chat session before local Qwen exhausts the Mac.
 
-Three signals, one action. They are not independent protections - they are
-three views of the same failure, ordered by how early they can be seen:
+The guard has two signals with different meanings:
 
-- ``M_MLX >= 6 GiB``  Qwen-local pressure. The only *leading* signal: MLX's
-  own allocation is measurable before the system notices.
-- ``A <= 20%``        System headroom is no longer healthy. Lags, because
-  macOS swaps while still reporting moderate free memory - evicting pages
-  raises the free percentage, so it reports the result of eviction rather
-  than its cause.
-- ``dS >= 1 GiB``     Pressure has already escaped into swap. Trailing by
-  definition; it can confirm the failure but never prevent it.
+* MLX allocation is Qwen-local and leads system pressure. At the configured
+  limit the session ends normally, its retained cache is cleared, and Qwen is
+  restarted only if that normal teardown fails to reclaim memory.
+* macOS critical memory pressure is a system-wide emergency. Qwen is restarted
+  before the session is replaced so the reconnect procedure has enough memory
+  to complete.
 
-Only the MLX cap can prevent Qwen-caused swap, and only if it is low enough
-that Qwen cannot eat the reserved headroom during its worst transient
-allocation - each request deep-copies the retained cache before extending it,
-so a peak of roughly twice the cache must fit inside the budget.
-
-Swap growth is measured against a per-session baseline rather than an absolute
-ceiling because macOS retains swap long after the pressure that caused it.
-
-The macOS tools are addressed absolutely: services run with a PATH that omits
-/usr/sbin, so a bare "sysctl" raises FileNotFoundError and the swap signal
-silently reads None.
+macOS pressure is observed with ``DISPATCH_SOURCE_TYPE_MEMORYPRESSURE``. It is
+event driven and intentionally uses the public normal/warning/critical states
+rather than deriving a second pressure policy from free RAM and swap.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
-import re
-import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from enum import IntEnum
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "MemoryReading",
     "MemoryGuardConfig",
-    "read_memory",
+    "MemoryReading",
+    "MemoryTrip",
+    "PressureLevel",
     "evaluate",
     "guard_loop",
+    "read_memory",
     "wait_for_recovery",
 ]
 
 GIB = 1024**3
 
-MEMORY_PRESSURE_BIN = "/usr/bin/memory_pressure"
-SYSCTL_BIN = "/usr/sbin/sysctl"
 
-_SWAP_RE = re.compile(r"used\s*=\s*(?P<used>[0-9.]+)(?P<unit>[KMG])", re.IGNORECASE)
-_UNIT_BYTES = {"K": 1024, "M": 1024**2, "G": 1024**3}
-_FREE_RE = re.compile(r"System-wide memory free percentage:\s*(\d+)%")
+class PressureLevel(IntEnum):
+    """Public libdispatch memory-pressure states."""
+
+    NORMAL = 1
+    WARNING = 2
+    CRITICAL = 4
+
+
+@dataclass(frozen=True)
+class MemoryTrip:
+    reason: str
+    restart_first: bool = False
 
 
 @dataclass(frozen=True)
 class MemoryReading:
     """One sample. ``None`` means that signal was unavailable."""
 
-    free_percent: int | None = None
-    swap_used_bytes: int | None = None
     mlx_active_bytes: int | None = None
+    pressure: PressureLevel | None = None
 
     @property
     def measured(self) -> bool:
-        return any(
-            v is not None
-            for v in (self.free_percent, self.swap_used_bytes, self.mlx_active_bytes)
-        )
+        return self.mlx_active_bytes is not None or self.pressure is not None
 
 
 @dataclass(frozen=True)
 class MemoryGuardConfig:
     enabled: bool = True
     max_mlx_bytes: int = 6 * GIB
-    min_free_percent: int = 20
-    max_swap_growth_bytes: int = 1 * GIB
-    # All three signals are cheap (~55ms combined), so they are polled far
-    # faster than the damage accrues: swap has been measured climbing 1.4 GiB
-    # in about ten seconds, which a 20s cadence cannot see in time.
+    recovery_mlx_bytes: int = int(4.5 * GIB)
     interval_seconds: float = 2.0
-    # A single glitched reading should not end a call, but anything longer than
-    # a couple of samples is slower than the failure it is meant to catch.
     consecutive_readings: int = 2
-    # How long to keep refusing new sessions after a trip.
-    recovery_free_percent: int = 30
-    recovery_timeout_seconds: float = 120.0
+    recovery_timeout_seconds: float = 20.0
 
     @classmethod
     def from_env(cls) -> "MemoryGuardConfig":
@@ -113,23 +100,95 @@ class MemoryGuardConfig:
         return cls(
             enabled=enabled,
             max_mlx_bytes=int(_num("CAAL_QWEN_MEMORY_TRIP_GB", 6) * GIB),
-            min_free_percent=int(_num("CAAL_MEMORY_MIN_FREE_PERCENT", 20)),
-            max_swap_growth_bytes=int(_num("CAAL_MEMORY_MAX_SWAP_GROWTH_GB", 1) * GIB),
+            recovery_mlx_bytes=int(_num("CAAL_QWEN_MEMORY_RECOVERY_GB", 4.5) * GIB),
             interval_seconds=_num("CAAL_MEMORY_CHECK_SECONDS", 2),
             consecutive_readings=int(_num("CAAL_MEMORY_TIGHT_READINGS", 2)),
-            recovery_free_percent=int(_num("CAAL_MEMORY_RECOVERY_FREE_PERCENT", 30)),
-            recovery_timeout_seconds=_num("CAAL_MEMORY_RECOVERY_TIMEOUT", 120),
+            recovery_timeout_seconds=_num("CAAL_MEMORY_RECOVERY_TIMEOUT", 20),
         )
 
 
-def _run(command: list[str], timeout: float = 10.0) -> str | None:
-    try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, timeout=timeout, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return result.stdout if result.returncode == 0 else None
+class _MacOSPressureSource:
+    """Keep the latest pressure transition reported by libdispatch."""
+
+    _MASK = (
+        PressureLevel.NORMAL | PressureLevel.WARNING | PressureLevel.CRITICAL
+    )
+
+    def __init__(self) -> None:
+        self._level: PressureLevel | None = None
+        self._source: int | None = None
+        self._handler = None
+        self._pid: int | None = None
+
+    def current(self) -> PressureLevel | None:
+        # LiveKit may fork job processes after importing this module. A dispatch
+        # source created in the parent does not survive that boundary, so each
+        # process lazily creates its own source on first use.
+        if sys.platform == "darwin" and self._pid != os.getpid():
+            self._level = None
+            self._source = None
+            self._handler = None
+            self._pid = os.getpid()
+            self._start()
+        return self._level
+
+    def _start(self) -> None:
+        try:
+            dispatch = ctypes.CDLL("/usr/lib/system/libdispatch.dylib")
+            source_type = ctypes.c_byte.in_dll(
+                dispatch, "_dispatch_source_type_memorypressure"
+            )
+
+            dispatch.dispatch_get_global_queue.argtypes = [ctypes.c_long, ctypes.c_ulong]
+            dispatch.dispatch_get_global_queue.restype = ctypes.c_void_p
+            dispatch.dispatch_source_create.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_ulong,
+                ctypes.c_void_p,
+            ]
+            dispatch.dispatch_source_create.restype = ctypes.c_void_p
+            dispatch.dispatch_source_get_data.argtypes = [ctypes.c_void_p]
+            dispatch.dispatch_source_get_data.restype = ctypes.c_ulong
+
+            callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+
+            @callback_type
+            def handle_pressure(_context) -> None:
+                if self._source is None:
+                    return
+                data = dispatch.dispatch_source_get_data(self._source)
+                if data & PressureLevel.CRITICAL:
+                    self._level = PressureLevel.CRITICAL
+                elif data & PressureLevel.WARNING:
+                    self._level = PressureLevel.WARNING
+                elif data & PressureLevel.NORMAL:
+                    self._level = PressureLevel.NORMAL
+
+            dispatch.dispatch_source_set_event_handler_f.argtypes = [
+                ctypes.c_void_p,
+                callback_type,
+            ]
+            dispatch.dispatch_activate.argtypes = [ctypes.c_void_p]
+
+            queue = dispatch.dispatch_get_global_queue(0, 0)
+            source = dispatch.dispatch_source_create(
+                ctypes.c_void_p(ctypes.addressof(source_type)),
+                0,
+                int(self._MASK),
+                queue,
+            )
+            if not source:
+                return
+            self._source = source
+            self._handler = handle_pressure  # Keep the C callback alive.
+            dispatch.dispatch_source_set_event_handler_f(source, handle_pressure)
+            dispatch.dispatch_activate(source)
+        except (AttributeError, OSError, ValueError):
+            logger.info("macOS memory-pressure notifications are unavailable")
+
+
+_PRESSURE_SOURCE = _MacOSPressureSource()
 
 
 def _mlx_active_bytes(qwen_base_url: str | None) -> int | None:
@@ -150,57 +209,29 @@ def _mlx_active_bytes(qwen_base_url: str | None) -> int | None:
 
 
 def read_memory(qwen_base_url: str | None = None) -> MemoryReading:
-    """Sample all three signals. Never raises."""
-    free_percent: int | None = None
-    swap_used: int | None = None
-
-    if pressure := _run([MEMORY_PRESSURE_BIN]):
-        if match := _FREE_RE.search(pressure):
-            free_percent = int(match.group(1))
-
-    if swap := _run([SYSCTL_BIN, "vm.swapusage"]):
-        if match := _SWAP_RE.search(swap):
-            swap_used = int(float(match.group("used")) * _UNIT_BYTES[match.group("unit").upper()])
-
+    """Sample Qwen allocation and the latest macOS pressure state. Never raises."""
     return MemoryReading(
-        free_percent=free_percent,
-        swap_used_bytes=swap_used,
         mlx_active_bytes=_mlx_active_bytes(qwen_base_url),
+        pressure=_PRESSURE_SOURCE.current(),
     )
 
 
-def evaluate(
-    reading: MemoryReading,
-    config: MemoryGuardConfig,
-    *,
-    baseline_swap_bytes: int | None = None,
-) -> str | None:
-    """Return why the guard should trip, or None."""
-    if not reading.measured:
-        return None
+def evaluate(reading: MemoryReading, config: MemoryGuardConfig) -> MemoryTrip | None:
+    """Return the required action when a guard signal trips."""
+    if reading.pressure == PressureLevel.CRITICAL:
+        return MemoryTrip(
+            "macOS reports critical memory pressure",
+            restart_first=True,
+        )
 
     if (
         reading.mlx_active_bytes is not None
         and reading.mlx_active_bytes >= config.max_mlx_bytes
     ):
-        return (
+        return MemoryTrip(
             f"Qwen is holding {reading.mlx_active_bytes / GIB:.2f} GiB "
             f"(limit {config.max_mlx_bytes / GIB:.2f} GiB)"
         )
-
-    if reading.free_percent is not None and reading.free_percent <= config.min_free_percent:
-        return (
-            f"only {reading.free_percent}% of system memory available "
-            f"(limit {config.min_free_percent}%)"
-        )
-
-    if reading.swap_used_bytes is not None and baseline_swap_bytes is not None:
-        growth = reading.swap_used_bytes - baseline_swap_bytes
-        if growth >= config.max_swap_growth_bytes:
-            return (
-                f"swap grew {growth / GIB:.2f} GiB during this session "
-                f"(limit {config.max_swap_growth_bytes / GIB:.2f} GiB)"
-            )
 
     return None
 
@@ -208,19 +239,19 @@ def evaluate(
 async def wait_for_recovery(
     config: MemoryGuardConfig, qwen_base_url: str | None = None
 ) -> bool:
-    """Block until memory looks healthy again, or the timeout expires."""
+    """Wait until cache teardown demonstrably reduced local Qwen allocation."""
+    if not qwen_base_url:
+        return True
+
     deadline = asyncio.get_running_loop().time() + config.recovery_timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
         reading = await asyncio.to_thread(read_memory, qwen_base_url)
-        healthy_mlx = (
-            reading.mlx_active_bytes is None
-            or reading.mlx_active_bytes < config.max_mlx_bytes * 0.75
-        )
-        healthy_free = (
-            reading.free_percent is None
-            or reading.free_percent >= config.recovery_free_percent
-        )
-        if healthy_mlx and healthy_free:
+        if reading.pressure == PressureLevel.CRITICAL:
+            return False
+        if (
+            reading.mlx_active_bytes is not None
+            and reading.mlx_active_bytes < config.recovery_mlx_bytes
+        ):
             return True
         await asyncio.sleep(config.interval_seconds)
     return False
@@ -231,7 +262,7 @@ async def guard_loop(
     config: MemoryGuardConfig | None = None,
     qwen_base_url: str | None = None,
 ) -> None:
-    """Poll the three signals and invoke ``on_trip(reason)`` once."""
+    """Poll the two signals and invoke ``on_trip`` once."""
     config = config or MemoryGuardConfig.from_env()
     if not config.enabled:
         logger.info("Memory guard disabled")
@@ -243,33 +274,41 @@ async def guard_loop(
         return
 
     logger.info(
-        "Memory guard active (MLX<%.1f GiB, free>%d%%, swap growth<%.1f GiB, every %.1fs)",
+        "Memory guard active (MLX<%.1f GiB, critical OS pressure, every %.1fs)",
         config.max_mlx_bytes / GIB,
-        config.min_free_percent,
-        config.max_swap_growth_bytes / GIB,
         config.interval_seconds,
     )
 
-    baseline_swap = probe.swap_used_bytes
-    tight = 0
+    previous: MemoryTrip | None = None
+    consecutive = 0
     while True:
         await asyncio.sleep(config.interval_seconds)
         reading = await asyncio.to_thread(read_memory, qwen_base_url)
-        reason = evaluate(reading, config, baseline_swap_bytes=baseline_swap)
-        if reason is None:
-            tight = 0
-            # Swap released: track the new floor so the next session is not
-            # measured against a level the machine has already recovered from.
-            if (
-                reading.swap_used_bytes is not None
-                and baseline_swap is not None
-                and reading.swap_used_bytes < baseline_swap
-            ):
-                baseline_swap = reading.swap_used_bytes
+        trip = evaluate(reading, config)
+        if trip is None:
+            previous = None
+            consecutive = 0
             continue
 
-        tight += 1
-        logger.warning("Memory trip %d/%d: %s", tight, config.consecutive_readings, reason)
-        if tight >= config.consecutive_readings:
-            await on_trip(reason)
+        # libdispatch already applies hysteresis to critical pressure. Act on it
+        # immediately; only raw MLX samples need the consecutive-reading filter.
+        if trip.restart_first:
+            await on_trip(trip)
+            return
+
+        consecutive = (
+            consecutive + 1
+            if previous is not None
+            and previous.restart_first == trip.restart_first
+            else 1
+        )
+        previous = trip
+        logger.warning(
+            "Memory trip %d/%d: %s",
+            consecutive,
+            config.consecutive_readings,
+            trip.reason,
+        )
+        if consecutive >= config.consecutive_readings:
+            await on_trip(trip)
             return

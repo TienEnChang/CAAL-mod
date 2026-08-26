@@ -36,7 +36,6 @@ if [[ "${CAAL_MEMORY_MONITOR_ENABLED:-true}" != "false" ]]; then
     --project "$PROJECT_DIR" monitor \
     --sample-seconds "${CAAL_MEMORY_SAMPLE_SECONDS:-60}" \
     --deep-seconds "${CAAL_MEMORY_DEEP_SAMPLE_SECONDS:-300}" \
-    --swap-restart-gb "${CAAL_SWAP_RESTART_GB:-3}" \
     >>"$PROJECT_DIR/.native/logs/memory-monitor.log" 2>&1 &
   monitor_pid=$!
 fi

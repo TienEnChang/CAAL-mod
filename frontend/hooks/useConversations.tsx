@@ -168,6 +168,47 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     [refresh, session]
   );
 
+  useEffect(() => {
+    const room = session.room;
+    const handleMemoryTrip = (
+      payload: Uint8Array,
+      _participant: unknown,
+      _kind: unknown,
+      topic?: string
+    ) => {
+      if (topic !== 'memory_guard_trip') return;
+
+      try {
+        const message = JSON.parse(new TextDecoder().decode(payload)) as {
+          type?: string;
+          conversation_id?: string;
+        };
+        if (message.type !== 'memory_guard_trip') return;
+
+        // The agent has already recovered or restarted Qwen. Reuse the exact
+        // room replacement used by a manual conversation switch, but leave the
+        // active conversation unchanged so the replacement job rehydrates it.
+        void reconnectAround(async () => {
+          const selectedId = await refreshListing();
+          return selectedId;
+        }).catch((reconnectError) => {
+          setError(
+            reconnectError instanceof Error
+              ? reconnectError.message
+              : 'Unable to recover the memory-limited session'
+          );
+        });
+      } catch {
+        // A malformed control packet must not disconnect the active call.
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleMemoryTrip);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleMemoryTrip);
+    };
+  }, [reconnectAround, refreshListing, session.room]);
+
   const createConversation = useCallback(async () => {
     setError(null);
     try {

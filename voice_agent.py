@@ -31,6 +31,7 @@ import random
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import requests
 
@@ -68,12 +69,13 @@ from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
 from caal.memory_guard import (  # noqa: E402
     MemoryGuardConfig,
-    evaluate,
+    MemoryTrip,
     guard_loop,
-    read_memory,
     wait_for_recovery,
 )
 from caal.qwen_cache import clear_local_qwen_cache  # noqa: E402
+from caal.qwen_process import restart_local_qwen  # noqa: E402
+from caal.speech_cache import clear_local_speech_cache  # noqa: E402
 from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
 
@@ -878,19 +880,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         """Sync wrapper for async webhook command handler."""
         asyncio.create_task(_handle_webhook_command(data))
 
-    # Step 6 of a memory trip: do not resume until memory has recovered. A
-    # previous session may have ended moments ago and the machine may still be
-    # paying for it, so starting straight into another one would trip again.
-    if memory_config.enabled:
-        probe = await asyncio.to_thread(read_memory, qwen_base_url)
-        if evaluate(probe, memory_config) is not None:
-            logger.warning("Memory still under pressure - waiting before starting")
-            if not await wait_for_recovery(memory_config, qwen_base_url):
-                logger.warning(
-                    "Memory did not recover in time; starting anyway so the user "
-                    "is not left with a call that never connects"
-                )
-
     # Start session AFTER handlers are registered
     await session.start(
         room=ctx.room,
@@ -914,7 +903,56 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # mid-call (which would quietly change what the assistant remembers), end
     # the call and let the next one start fresh from rehydrated history.
 
-    async def _end_call_for_memory(reason: str) -> None:
+    memory_trip: MemoryTrip | None = None
+
+    async def _restart_qwen(reason: str) -> bool:
+        if not qwen_base_url:
+            logger.warning("Cannot restart Qwen for memory trip: no local Qwen endpoint")
+            return False
+        logger.warning("Restarting Qwen for memory: %s", reason)
+        return await asyncio.to_thread(
+            restart_local_qwen,
+            Path(_script_dir),
+            qwen_base_url,
+        )
+
+    async def _publish_memory_reconnect(trip: MemoryTrip) -> None:
+        """Tell the desktop to replace this job without changing conversation."""
+        import json
+
+        try:
+            await ctx.room.local_participant.publish_data(
+                json.dumps(
+                    {
+                        "type": "memory_guard_trip",
+                        "conversation_id": conversation_id,
+                        "reason": trip.reason,
+                    }
+                ).encode("utf-8"),
+                reliable=True,
+                topic="memory_guard_trip",
+            )
+        except Exception as error:
+            logger.warning("Could not request reconnect after memory trip: %s", error)
+
+    async def _record_memory_trip(trip: MemoryTrip) -> None:
+        try:
+            conversation_store.append_message(
+                conversation_id,
+                role="tool",
+                content=f"Session ended - {trip.reason}",
+                message_id=f"memory_guard_{uuid.uuid4().hex}",
+                metadata={
+                    "kind": "memory_guard",
+                    "reason": trip.reason,
+                    "status": "failed",
+                },
+            )
+            await _publish_conversation_updated()
+        except Exception as error:
+            logger.warning("Could not record memory shutdown notice: %s", error)
+
+    async def _end_call_for_memory(trip: MemoryTrip) -> None:
         """Terminate this session on a memory trip.
 
         mlx-lm exposes no way to cancel an in-flight request, so a generation
@@ -926,27 +964,31 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         in the meantime, and clearing early would not touch an in-flight
         request's own cache anyway.
         """
-        logger.warning(f"Memory guard tripped, ending session: {reason}")
+        nonlocal memory_trip
+        memory_trip = trip
+        logger.warning("Memory guard tripped, ending session: %s", trip.reason)
 
         # Mark terminated so llm_node refuses any further turn.
-        assistant._memory_terminated = reason
+        assistant._memory_terminated = trip.reason
+
+        # At critical system pressure there may not be enough memory left to
+        # close LiveKit, clear caches, and dispatch a replacement job. Reclaim
+        # Qwen first; breaking an in-flight request is intentional here.
+        if trip.restart_first:
+            await _restart_qwen(trip.reason)
 
         # Surface it as system text in the transcript rather than speech. The
         # "tool" role is the transcript's system-activity lane and is already
         # excluded from context and summary queries, so this is display-only and
         # never reaches the model. Speaking it would also mean holding the call
         # open for several seconds of TTS purely to narrate its own ending.
-        try:
-            conversation_store.append_message(
-                conversation_id,
-                role="tool",
-                content=f"Session ended - {reason}",
-                message_id=f"memory_guard_{uuid.uuid4().hex}",
-                metadata={"kind": "memory_guard", "reason": reason, "status": "failed"},
-            )
-            await _publish_conversation_updated()
-        except Exception as e:
-            logger.warning(f"Could not record memory shutdown notice: {e}")
+        await _record_memory_trip(trip)
+
+        # Critical pressure has already been relieved by the restart, so the
+        # desktop can begin replacing this job immediately. The graceful MLX
+        # path publishes only after cache recovery is verified in teardown.
+        if trip.restart_first:
+            await _publish_memory_reconnect(trip)
 
         # End the session the same way a hang-up does, so both paths run the
         # same teardown: closing it fires the "close" handler, which sets
@@ -968,11 +1010,28 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         await close_event.wait()
     finally:
         memory_guard_task.cancel()
-        if runtime["llm_provider"] == "openai_compatible":
+        await asyncio.gather(memory_guard_task, return_exceptions=True)
+        if runtime["llm_provider"] == "openai_compatible" and not (
+            memory_trip and memory_trip.restart_first
+        ):
             await asyncio.to_thread(
                 clear_local_qwen_cache,
                 runtime["openai_base_url"],
             )
+
+        speech_cache_urls: set[str] = set()
+        if runtime["stt_provider"] == "speaches":
+            speech_cache_urls.add(SPEACHES_URL)
+        if tts_provider == "kokoro":
+            speech_cache_urls.add(KOKORO_URL)
+        for speech_url in speech_cache_urls:
+            await asyncio.to_thread(clear_local_speech_cache, speech_url)
+
+        if memory_trip and not memory_trip.restart_first:
+            recovered = await wait_for_recovery(memory_config, qwen_base_url)
+            if not recovered:
+                await _restart_qwen("normal cache teardown did not reclaim MLX memory")
+            await _publish_memory_reconnect(memory_trip)
     # Returning from the entrypoint does not finalize a LiveKit job. Explicitly
     # shut it down so its agent participant leaves the room before the desktop
     # reconnects for a different conversation. Otherwise the stale participant

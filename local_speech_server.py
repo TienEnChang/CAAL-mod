@@ -54,6 +54,10 @@ _whisper = None
 _kokoro = None
 _whisper_lock = threading.Lock()
 _kokoro_lock = threading.Lock()
+# STT, TTS and allocator cleanup all share MLX's process-global allocator.
+# Serializing them prevents a call-end cleanup from racing work that is still
+# materializing audio on a worker thread.
+_mlx_inference_lock = threading.Lock()
 
 
 def _get_whisper():
@@ -180,6 +184,22 @@ def _synthesize(text: str, voice: str, speed: float) -> bytes:
     return output.getvalue()
 
 
+def _run_transcription(audio_bytes: bytes, language: str | None) -> str:
+    with _mlx_inference_lock:
+        return _transcribe(audio_bytes, language)
+
+
+def _run_synthesis(text: str, voice: str, speed: float) -> bytes:
+    with _mlx_inference_lock:
+        return _synthesize(text, voice, speed)
+
+
+def _clear_mlx_cache() -> None:
+    with _mlx_inference_lock:
+        mx.synchronize()
+        mx.clear_cache()
+
+
 class SpeechRequest(BaseModel):
     input: str
     model: str = "kokoro"
@@ -202,6 +222,13 @@ def models() -> dict:
             {"id": KOKORO_MODEL, "object": "model"},
         ],
     }
+
+
+@app.post("/v1/cache/clear")
+async def clear_cache() -> dict[str, str]:
+    """Release reusable MLX buffers while retaining both loaded models."""
+    await asyncio.to_thread(_clear_mlx_cache)
+    return {"status": "ok"}
 
 
 def _available_voices() -> list[str]:
@@ -260,7 +287,9 @@ async def transcriptions(
 ):
     del model
     try:
-        text = await asyncio.to_thread(_transcribe, await file.read(), language)
+        text = await asyncio.to_thread(
+            _run_transcription, await file.read(), language
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Whisper failed: {exc}") from exc
     if response_format == "text":
@@ -276,7 +305,7 @@ async def speech(request: SpeechRequest):
         raise HTTPException(status_code=400, detail="input must not be empty")
     try:
         audio = await asyncio.to_thread(
-            _synthesize,
+            _run_synthesis,
             request.input,
             request.voice,
             request.speed,
