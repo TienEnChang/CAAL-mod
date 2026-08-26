@@ -3,7 +3,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { RoomEvent } from 'livekit-client';
 import { useSessionContext } from '@livekit/components-react';
-import { preferBuiltInMacMicrophone } from '@/lib/preferred-microphone';
+import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
 
 export interface ConversationSummary {
   id: string;
@@ -119,7 +119,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setActiveId(selectedId);
       await refresh();
       if (reconnect) {
-        await preferBuiltInMacMicrophone(session.room);
+        await preferSystemDefaultMicrophone(session.room);
         await session.start();
       }
     },

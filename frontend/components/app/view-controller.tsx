@@ -7,7 +7,7 @@ import { SessionView } from '@/components/app/session-view';
 import { MemoryPanel } from '@/components/memory';
 import { SettingsPanel } from '@/components/settings/settings-panel';
 import { ToolsPanel } from '@/components/tools';
-import { preferBuiltInMacMicrophone } from '@/lib/preferred-microphone';
+import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
 
 interface ViewControllerProps {
   appConfig: AppConfig;
@@ -20,7 +20,7 @@ export function ViewController({ appConfig }: ViewControllerProps) {
   const [memoryOpen, setMemoryOpen] = useState(false);
 
   const start = useCallback(async () => {
-    await preferBuiltInMacMicrophone(session.room);
+    await preferSystemDefaultMicrophone(session.room);
     await session.start();
   }, [session]);
 
