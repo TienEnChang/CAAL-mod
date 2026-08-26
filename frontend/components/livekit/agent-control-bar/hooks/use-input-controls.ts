@@ -85,9 +85,11 @@ export function useInputControls({
 
   const handleToggleMicrophone = useCallback(
     async (enabled?: boolean) => {
-      await microphoneToggle.toggle(enabled);
-      // persist audio input enabled preference
-      saveMicrophoneEnabledPreference(enabled ?? !microphoneToggle.enabled);
+      // Persist before the asynchronous LiveKit operation so ending or switching
+      // the call cannot race ahead of the user's choice.
+      const nextEnabled = enabled ?? !microphoneToggle.enabled;
+      saveMicrophoneEnabledPreference(nextEnabled);
+      await microphoneToggle.toggle(nextEnabled);
     },
     [microphoneToggle]
   );

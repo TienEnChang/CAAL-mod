@@ -12,6 +12,7 @@ import { useConversations } from '@/hooks/useConversations';
 import { useToolActivities } from '@/hooks/useToolStatus';
 import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
 import {
+  getMicrophoneEnabledPreference,
   saveMicrophoneEnabledPreference,
   startSessionWithMicrophonePreference,
 } from '@/lib/microphone-preference';
@@ -53,9 +54,9 @@ export function DesktopMobileBridge() {
   const microphonePublication = session.room.localParticipant.getTrackPublication(
     Track.Source.Microphone
   );
-  const microphoneEnabled = Boolean(
-    session.isConnected && microphonePublication && !microphonePublication.isMuted
-  );
+  const microphoneEnabled = session.isConnected
+    ? Boolean(microphonePublication && !microphonePublication.isMuted)
+    : getMicrophoneEnabledPreference();
   const partialIds = useMemo(
     () =>
       new Set(
@@ -191,14 +192,14 @@ export function DesktopMobileBridge() {
         } else if (command.action === 'end_call') {
           if (session.isConnected) await session.end();
         } else if (command.action === 'set_microphone_enabled') {
-          if (!session.isConnected) throw new Error('The desktop call is not connected');
-          if (command.microphoneEnabled) {
-            await preferSystemDefaultMicrophone(session.room);
+          const enabled = command.microphoneEnabled ?? false;
+          saveMicrophoneEnabledPreference(enabled);
+          if (session.isConnected) {
+            if (enabled) {
+              await preferSystemDefaultMicrophone(session.room);
+            }
+            await session.room.localParticipant.setMicrophoneEnabled(enabled);
           }
-          await session.room.localParticipant.setMicrophoneEnabled(
-            command.microphoneEnabled ?? false
-          );
-          saveMicrophoneEnabledPreference(command.microphoneEnabled ?? false);
         } else if (command.action === 'create_conversation') {
           const created = await createConversation();
           if (!created) throw new Error('The desktop could not create a new session');

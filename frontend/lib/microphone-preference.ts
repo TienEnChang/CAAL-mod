@@ -2,6 +2,7 @@ import type { UseSessionReturn } from '@livekit/components-react';
 import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
 
 const MICROPHONE_ENABLED_KEY = 'caal-microphone-enabled';
+export const MICROPHONE_PREFERENCE_CHANGED_EVENT = 'caal-microphone-preference-changed';
 
 export function getMicrophoneEnabledPreference(): boolean {
   if (typeof window === 'undefined') return true;
@@ -10,6 +11,9 @@ export function getMicrophoneEnabledPreference(): boolean {
 
 export function saveMicrophoneEnabledPreference(enabled: boolean): void {
   window.localStorage.setItem(MICROPHONE_ENABLED_KEY, String(enabled));
+  window.dispatchEvent(
+    new CustomEvent<boolean>(MICROPHONE_PREFERENCE_CHANGED_EVENT, { detail: enabled })
+  );
 }
 
 export async function startSessionWithMicrophonePreference(

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
+import { Track } from 'livekit-client';
 import {
   useSessionContext,
   useSessionMessages,
@@ -12,8 +13,6 @@ import {
   ArrowDownIcon,
   BrainIcon,
   GearIcon,
-  MicrophoneIcon,
-  MicrophoneSlashIcon,
   WaveformIcon,
   WrenchIcon,
 } from '@phosphor-icons/react/dist/ssr';
@@ -25,13 +24,14 @@ import {
   AgentControlBar,
   type ControlBarControls,
 } from '@/components/livekit/agent-control-bar/agent-control-bar';
+import { TrackSelector } from '@/components/livekit/agent-control-bar/track-selector';
 import { Button } from '@/components/livekit/button';
 import { ScrollArea } from '@/components/livekit/scroll-area/scroll-area';
-import { Toggle } from '@/components/livekit/toggle';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useConversations } from '@/hooks/useConversations';
 import { useToolActivities } from '@/hooks/useToolStatus';
 import {
+  MICROPHONE_PREFERENCE_CHANGED_EVENT,
   getMicrophoneEnabledPreference,
   saveMicrophoneEnabledPreference,
 } from '@/lib/microphone-preference';
@@ -130,6 +130,14 @@ export const SessionView = ({
       ),
     [session.isConnected, session.room.localParticipant.identity, transcriptions]
   );
+  const preCallMicrophoneTrackRef = useMemo(
+    () => ({
+      participant: session.room.localParticipant,
+      source: Track.Source.Microphone,
+      publication: session.room.localParticipant.getTrackPublication(Track.Source.Microphone),
+    }),
+    [session.room.localParticipant]
+  );
 
   const controls: ControlBarControls = {
     leave: true,
@@ -164,6 +172,15 @@ export const SessionView = ({
   useEffect(() => {
     setChatOpen(true);
   }, [activeId]);
+
+  useEffect(() => {
+    const syncMicrophonePreference = (event: Event) => {
+      setMicrophoneEnabledPreference((event as CustomEvent<boolean>).detail);
+    };
+    window.addEventListener(MICROPHONE_PREFERENCE_CHANGED_EVENT, syncMicrophonePreference);
+    return () =>
+      window.removeEventListener(MICROPHONE_PREFERENCE_CHANGED_EVENT, syncMicrophonePreference);
+  }, []);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -326,24 +343,16 @@ export const SessionView = ({
           <div className="bg-background relative mx-auto max-w-2xl pb-3 md:pb-12">
             <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
             <div className="border-input/50 dark:border-muted flex items-center gap-2 rounded-[31px] border p-3 drop-shadow-md/3">
-              <Tooltip content={tControlBar('toggleMicrophone')}>
-                <Toggle
-                  size="icon"
-                  variant="primary"
-                  aria-label={tControlBar('toggleMicrophone')}
-                  pressed={microphoneEnabledPreference}
-                  onPressedChange={updateMicrophonePreference}
-                >
-                  {microphoneEnabledPreference ? (
-                    <MicrophoneIcon weight="bold" />
-                  ) : (
-                    <MicrophoneSlashIcon weight="bold" />
-                  )}
-                </Toggle>
-              </Tooltip>
+              <TrackSelector
+                kind="audioinput"
+                aria-label={tControlBar('toggleMicrophone')}
+                source={Track.Source.Microphone}
+                pressed={microphoneEnabledPreference}
+                audioTrackRef={preCallMicrophoneTrackRef}
+                onPressedChange={updateMicrophonePreference}
+              />
               <Button
                 variant="primary"
-                size="lg"
                 onClick={onStartCall}
                 className="grow rounded-full font-mono"
               >

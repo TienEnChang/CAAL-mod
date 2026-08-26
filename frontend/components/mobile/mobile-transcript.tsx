@@ -530,7 +530,7 @@ export function MobileTranscript() {
 
           <button
             type="button"
-            disabled={!desktopControllerReady || !desktopConnected || controlsBusy}
+            disabled={!desktopControllerReady || controlsBusy}
             onClick={() =>
               void sendControl('set_microphone_enabled', {
                 microphoneEnabled: !microphoneEnabled,
