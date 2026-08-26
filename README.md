@@ -106,6 +106,41 @@ It then starts and stops with the rest of the stack, with the editor at
 `http://127.0.0.1:5678`. See [n8n Workflows](docs/N8N-WORKFLOWS.md) for
 enabling MCP access and connecting CAAL.
 
+#### Native backup and restore
+
+Git contains the application and rebuildable environment. Keep one small,
+encrypted state backup for conversations, memory, runtime settings and
+credentials, n8n workflows, custom prompts, and greetings:
+
+```bash
+./backup-native.sh /path/to/caal-native.caalbak
+```
+
+SQLite databases are snapshotted consistently while CAAL is running. Models,
+virtual environments, binaries, caches, logs, and process files are excluded.
+The archive uses authenticated AES-256-GCM encryption. On first use, the script
+creates a strong random `CAAL Native Backup Key` in the macOS login Keychain;
+later backups and restores retrieve it automatically. A normal macOS account
+password change keeps the Keychain item—and existing archives—working.
+
+On a fresh machine, clone the repository and install its dependencies first.
+Stop CAAL before restoring state:
+
+```bash
+./start-native.sh --stop
+./restore-native.sh /path/to/caal-native.caalbak
+./start-native.sh
+```
+
+Restore refuses to replace existing state unless `--force` is supplied. The
+n8n MCP token and API key return through `settings.json`; the separate n8n
+encryption key is restored alongside its database so stored workflow
+credentials remain decryptable. Backup files contain sensitive credentials and
+personal data even though they are encrypted. For a fresh-Mac disaster restore,
+restore the login Keychain from Time Machine before running this script. Use
+`--prompt` or `--password-file FILE` only when a portable key is intentionally
+managed outside macOS Keychain.
+
 ### HTTPS & Network
 
 HTTPS is enabled by default with auto-generated self-signed certificates. This is required because browsers block microphone access on non-`localhost` HTTP.

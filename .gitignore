@@ -48,6 +48,7 @@ settings.json
 prompt/custom.md
 mcp_servers.json
 .native/
+*.caalbak
 
 # Database files
 *.db
