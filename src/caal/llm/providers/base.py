@@ -196,7 +196,7 @@ class LLMProvider(ABC):
                         "name": tc.name,
                         # Arguments must be JSON string for Groq compatibility
                         "arguments": (
-                            json.dumps(tc.arguments)
+                            json.dumps(tc.arguments, ensure_ascii=False)
                             if isinstance(tc.arguments, dict)
                             else str(tc.arguments)
                         ),

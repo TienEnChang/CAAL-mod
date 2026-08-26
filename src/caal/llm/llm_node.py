@@ -65,8 +65,11 @@ class ToolDataCache:
             return None
         parts = ["Recent tool calls and responses for reference:"]
         for entry in self._cache:
-            args = json.dumps(entry['args']) if entry.get('args') else ''
-            parts.append(f"\n{entry['tool']}({args}) → {json.dumps(entry['data'])}")
+            # ensure_ascii would re-encode CJK as \uXXXX escapes, which the
+            # model reads as literal escape text and mangles or drops.
+            args = json.dumps(entry['args'], ensure_ascii=False) if entry.get('args') else ''
+            data = json.dumps(entry['data'], ensure_ascii=False)
+            parts.append(f"\n{entry['tool']}({args}) → {data}")
         return "\n".join(parts)
 
     def clear(self) -> None:
@@ -352,7 +355,11 @@ def _build_messages_from_context(
             try:
                 # Arguments must be JSON string for Groq compatibility
                 args = getattr(item, "arguments", {}) or {}
-                args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+                args_str = (
+                    json.dumps(args, ensure_ascii=False)
+                    if isinstance(args, dict)
+                    else str(args)
+                )
                 chat_messages.append(
                     {
                         "role": "assistant",
@@ -654,7 +661,9 @@ async def _execute_tool_calls(
 
             # Format tool result - preserve JSON structure for LLM
             if isinstance(tool_result, dict):
-                result_content = json.dumps(tool_result)
+                # Non-ASCII must survive as real characters; \uXXXX escapes get
+                # misread by the model (Traditional Chinese silently dropped).
+                result_content = json.dumps(tool_result, ensure_ascii=False)
             else:
                 result_content = str(tool_result)
 

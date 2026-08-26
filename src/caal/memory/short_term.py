@@ -203,10 +203,8 @@ class ShortTermMemory:
             source = entry["source"]
 
             # Format value (truncate if too long)
-            if isinstance(value, dict):
-                value_str = json.dumps(value)
-            elif isinstance(value, list):
-                value_str = json.dumps(value)
+            if isinstance(value, (dict, list)):
+                value_str = json.dumps(value, ensure_ascii=False)
             else:
                 value_str = str(value)
 

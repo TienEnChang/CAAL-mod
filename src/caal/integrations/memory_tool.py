@@ -159,7 +159,7 @@ async def execute_memory_short(
             return f"No user memory found for key: {key}"
 
         if isinstance(result, (dict, list)):
-            result = json.dumps(result)
+            result = json.dumps(result, ensure_ascii=False)
         return f'User memory "{key}": {result}'
 
     elif action == "delete":

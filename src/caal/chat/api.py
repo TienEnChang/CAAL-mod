@@ -287,7 +287,7 @@ def _build_debug_info(
     tool_responses = []
     for entry in new_cache_entries:
         data = entry.get("data")
-        data_str = json.dumps(data) if data is not None else ""
+        data_str = json.dumps(data, ensure_ascii=False) if data is not None else ""
         tool_responses.append(
             ToolResponseInfo(
                 tool=entry["tool"],
@@ -319,7 +319,9 @@ def _build_debug_info(
         prompt_tokens = _estimate_tokens(" ".join(context_parts))
 
         if tool_context and tool_context._llm_tools_cache:
-            tool_defs_str = json.dumps(tool_context._llm_tools_cache)
+            tool_defs_str = json.dumps(
+                tool_context._llm_tools_cache, ensure_ascii=False
+            )
             prompt_tokens += _estimate_tokens(tool_defs_str)
 
         source = "estimate"

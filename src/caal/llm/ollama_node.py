@@ -58,7 +58,8 @@ class ToolDataCache:
             return None
         parts = ["Recent tool response data for reference:"]
         for entry in self._cache:
-            parts.append(f"\n{entry['tool']}: {json.dumps(entry['data'])}")
+            data = json.dumps(entry['data'], ensure_ascii=False)
+            parts.append(f"\n{entry['tool']}: {data}")
         return "\n".join(parts)
 
     def clear(self) -> None:
