@@ -9,6 +9,7 @@ import { ViewController } from '@/components/app/view-controller';
 import { WakeWordProvider } from '@/components/app/wake-word-provider';
 import { ConversationLayout } from '@/components/conversations/conversation-sidebar';
 import { Toaster } from '@/components/livekit/toaster';
+import { DesktopMobileBridge } from '@/components/mobile/desktop-mobile-bridge';
 import { LanguageSelector, SetupWizard } from '@/components/setup';
 import { useCaalTheme } from '@/hooks/useCaalTheme';
 // import { useAgentErrors } from '@/hooks/useAgentErrors';
@@ -172,6 +173,7 @@ export function App({ appConfig }: AppProps) {
       >
         <AppSetup />
         <ConversationProvider>
+          <DesktopMobileBridge />
           <ConversationLayout>
             <main className="h-full">
               <ViewController appConfig={appConfig} />
