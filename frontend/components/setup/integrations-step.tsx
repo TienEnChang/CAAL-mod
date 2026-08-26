@@ -23,53 +23,11 @@ export function IntegrationsStep({ data, updateData }: IntegrationsStepProps) {
   const tProviders = useTranslations('Settings.providers');
   const tCommon = useTranslations('Common');
 
-  const [hassTest, setHassTest] = useState<IntegrationTestState>({
-    status: 'idle',
-    error: null,
-    info: null,
-  });
   const [n8nTest, setN8nTest] = useState<IntegrationTestState>({
     status: 'idle',
     error: null,
     info: null,
   });
-
-  // Test Home Assistant connection
-  const testHass = useCallback(async () => {
-    if (!data.hass_host || !data.hass_token) return;
-
-    setHassTest({ status: 'testing', error: null, info: null });
-
-    try {
-      const response = await fetch('/api/setup/test-hass', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host: data.hass_host, token: data.hass_token }),
-      });
-
-      const result = await response.json();
-
-      if (result.success) {
-        setHassTest({
-          status: 'success',
-          error: null,
-          info: `${t('connected')} - ${t('entities', { count: result.device_count })}`,
-        });
-      } else {
-        setHassTest({
-          status: 'error',
-          error: result.error || 'Connection failed',
-          info: null,
-        });
-      }
-    } catch {
-      setHassTest({
-        status: 'error',
-        error: 'Failed to connect',
-        info: null,
-      });
-    }
-  }, [data.hass_host, data.hass_token, t]);
 
   // Build full n8n MCP URL from host
   const getN8nMcpUrl = (host: string) => {
@@ -155,57 +113,6 @@ export function IntegrationsStep({ data, updateData }: IntegrationsStepProps) {
   return (
     <div className="space-y-4">
       <p className="text-muted-foreground text-sm">{t('optionalNote')}</p>
-
-      {/* Home Assistant */}
-      <div className="border-input dark:border-muted space-y-3 rounded-lg border p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="font-medium">{t('homeAssistant')}</div>
-            <div className="text-muted-foreground text-xs">{t('homeAssistantDesc')}</div>
-          </div>
-          <Toggle
-            enabled={data.hass_enabled}
-            onToggle={() => updateData({ hass_enabled: !data.hass_enabled })}
-          />
-        </div>
-
-        {data.hass_enabled && (
-          <div className="space-y-3 pt-2">
-            <div className="space-y-1">
-              <label className="text-muted-foreground text-xs">{tProviders('hostUrl')}</label>
-              <input
-                type="text"
-                value={data.hass_host}
-                onChange={(e) => updateData({ hass_host: e.target.value })}
-                placeholder="http://homeassistant.local:8123"
-                className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-muted-foreground text-xs">{t('longLivedToken')}</label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={data.hass_token}
-                  onChange={(e) => updateData({ hass_token: e.target.value })}
-                  placeholder="eyJ0eX..."
-                  className="border-input bg-background flex-1 rounded-md border px-3 py-2 text-sm"
-                />
-                <button
-                  onClick={testHass}
-                  disabled={!data.hass_host || !data.hass_token || hassTest.status === 'testing'}
-                  className="bg-muted hover:bg-muted/80 flex items-center gap-2 rounded-md px-3 py-2 text-sm disabled:opacity-50"
-                >
-                  <StatusIcon status={hassTest.status} />
-                  {tCommon('test')}
-                </button>
-              </div>
-              {hassTest.error && <p className="text-xs text-red-500">{hassTest.error}</p>}
-              {hassTest.info && <p className="text-xs text-green-500">{hassTest.info}</p>}
-            </div>
-          </div>
-        )}
-      </div>
 
       {/* n8n */}
       <div className="border-input dark:border-muted space-y-3 rounded-lg border p-4">

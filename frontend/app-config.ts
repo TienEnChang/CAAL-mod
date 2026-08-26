@@ -11,7 +11,7 @@ export interface AppConfig {
   isPreConnectBufferEnabled: boolean;
 
   logo: string;
-  theme?: ThemeName;  // Use theme system instead of individual accent colors
+  theme?: ThemeName; // Use theme system instead of individual accent colors
 
   // Legacy support - deprecated, use theme instead
   accent?: string;
@@ -26,7 +26,7 @@ export interface AppConfig {
 export const APP_CONFIG_DEFAULTS: AppConfig = {
   companyName: 'CAAL',
   pageTitle: 'CAAL Voice Assistant',
-  pageDescription: 'A local voice assistant with Home Assistant and n8n integrations',
+  pageDescription: 'A local voice assistant with n8n workflow integrations',
 
   supportsChatInput: true,
   supportsVideoInput: false,
@@ -34,7 +34,7 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   isPreConnectBufferEnabled: true,
 
   logo: '/cwl-logo-round.png',
-  theme: 'midnight',  // Use Midnight theme
+  theme: 'midnight', // Use Midnight theme
 
   // for LiveKit Cloud Sandbox
   sandboxId: undefined,

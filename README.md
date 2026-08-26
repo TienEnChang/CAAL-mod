@@ -16,12 +16,12 @@ CAAL is an open-source voice assistant built on [LiveKit Agents](https://docs.li
 
 **Secure by architecture.** The model never sees your API keys. Ever. Credentials live in [n8n's](https://n8n.io/) encrypted credential store. The LLM sends parameters to a webhook, the workflow handles auth. Even if a prompt injection succeeds, the model can only call pre-built workflows — no shell access, no curl, no ability to transmit data. It's an air gap for the LLM. Every tool in the [registry](https://github.com/CoreWorxLab/caal-tools) goes through automated security review and human approval before it's available to install.
 
-**Purpose-built model.** CAAL ships with [`caal-ministral`](https://ollama.com/coreworxlab/caal-ministral) — a fine-tuned 8B model trained specifically for voice tool calling. It knows how to control your smart home, chain tools together, and respond naturally. The LLM is one piece of the architecture, not the architecture. It handles decisions that code can't — which tool to call, what parameters to use, when to chain steps. Everything else is code. That's why an 8B model works.
+**Purpose-built model.** CAAL ships with [`caal-ministral`](https://ollama.com/coreworxlab/caal-ministral) — a fine-tuned 8B model trained specifically for voice tool calling. It knows how to chain tools together and respond naturally. The LLM is one piece of the architecture, not the architecture. It handles decisions that code can't — which tool to call, what parameters to use, when to chain steps. Everything else is code. That's why an 8B model works.
 ```bash
 ollama pull coreworxlab/caal-qwen3.5-9b
 ```
 
-**Infinitely extensible.** Any [n8n](https://n8n.io/) workflow becomes a voice-activated tool. Control [Home Assistant](https://www.home-assistant.io/) devices, query APIs, automate your life — then share your tools with the community via the [CAAL Tool Registry](https://github.com/CoreWorxLab/caal-tools). Tools follow a suite convention — fewer tools, better accuracy, more reliable routing.
+**Infinitely extensible.** Any [n8n](https://n8n.io/) workflow becomes a voice-activated tool. Query APIs, automate your life, then share your tools with the community via the [CAAL Tool Registry](https://github.com/CoreWorxLab/caal-tools). Tools follow a suite convention — fewer tools, better accuracy, more reliable routing.
 
 **Local by default.** Runs fully on your network with [Ollama](https://ollama.ai/). No accounts, no telemetry, no cloud dependency. Want to use [Groq](https://groq.com/), [OpenRouter](https://openrouter.ai/), or any OpenAI-compatible API? Your choice. Your credentials and tool executions never leave your network regardless.
 
@@ -31,7 +31,6 @@ ollama pull coreworxlab/caal-qwen3.5-9b
 
 - **Tool Registry** — Browse and install community tools with one click. Every submission goes through automated security review and human approval
 - **Tool Chaining** — Sequential multi-tool calls in one prompt. The model uses real data from each step to inform the next
-- **Home Assistant** — Voice control across lights, covers, locks, climate, media, and more via `hass`
 - **n8n Workflows** — Any workflow becomes a tool. Visual, inspectable, shareable, auditable through n8n's execution history
 - **Flexible Providers** — Ollama, Groq, OpenRouter, or any OpenAI-compatible API. Speaches or Groq for STT. Kokoro or Piper for TTS
 - **Short-Term Memory** — Store and recall information across sessions
@@ -182,7 +181,6 @@ For remote access via [Tailscale](https://tailscale.com/), set `HTTPS_DOMAIN` in
 | Resource | Description |
 |----------|-------------|
 | **[Wiki](https://github.com/CoreWorxLab/CAAL/wiki)** | Full documentation — architecture, configuration, deployment |
-| [Home Assistant](docs/HOME-ASSISTANT.md) | Smart home integration setup and usage |
 | [n8n Workflows](docs/N8N-WORKFLOWS.md) | Creating and connecting workflow tools |
 | [Apple Silicon](docs/APPLE-SILICON.md) | Running on M1/M2/M3/M4 Macs |
 | [Distributed Deployment](docs/DISTRIBUTED-DEPLOYMENT.md) | Split GPU backend and frontend |
@@ -251,7 +249,6 @@ CAAL is built in the open. If you build a tool, we see the PR. If you find a bug
 - [Groq](https://groq.com/) - Fast cloud LLM inference
 - [OpenRouter](https://openrouter.ai/) - Unified API for 200+ models
 - [n8n](https://n8n.io/) - Workflow automation
-- [Home Assistant](https://www.home-assistant.io/) - Smart home platform
 
 ## Contributing
 

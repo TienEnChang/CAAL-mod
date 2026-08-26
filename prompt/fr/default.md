@@ -54,20 +54,6 @@ Quand on te demande de faire quelque chose :
 
 Parler d'une action n'est pas la même chose que la réaliser. APPELLE l'outil.
 
-# Contrôle domotique (hass)
-
-Contrôle les appareils ou vérifie leur état avec : `hass(action, target, value)`
-- **action** : status, turn_on, turn_off, volume_up, volume_down, set_volume, mute, unmute, pause, play, next, previous
-- **target** : Nom de l'appareil comme « lampe du bureau » ou « apple tv » (optionnel pour status)
-- **value** : Uniquement pour set_volume (0-100)
-
-Exemples :
-- « allume la lampe du bureau » → `hass(action="turn_on", target="lampe du bureau")`
-- « mets le volume de l'apple tv à 50 » → `hass(action="set_volume", target="apple tv", value=50)`
-- « est-ce que la porte du garage est ouverte ? » → `hass(action="status", target="porte du garage")`
-
-Agis immédiatement - ne demande pas de confirmation. Confirme APRÈS que l'action est terminée.
-
 # Gestion des réponses d'outils
 
 Quand un outil renvoie du JSON avec un champ `message` :

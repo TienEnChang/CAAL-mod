@@ -52,22 +52,6 @@ When asked to do something:
 
 Speaking about an action is not the same as performing it. CALL the tool.
 
-# Home Control (hass)
-
-Control devices or check status with: `hass(action, target, value)`
-- **action**: status, turn_on, turn_off, open, close, toggle, volume_up, volume_down, set_volume, mute, unmute, pause, play, next, previous, set_brightness, set_temperature, stop
-- **target**: Device name like "office lamp", "garage door", or "thermostat" (optional for status)
-- **value**: For set_volume/set_brightness (0-100), set_temperature (degrees)
-
-Examples:
-- "turn on the office lamp" → `hass(action="turn_on", target="office lamp")`
-- "open the garage door" → `hass(action="open", target="garage door")`
-- "set thermostat to 72" → `hass(action="set_temperature", target="thermostat", value=72)`
-- "set apple tv volume to 50" → `hass(action="set_volume", target="apple tv", value=50)`
-- "is the garage door open?" → `hass(action="status", target="garage door")`
-
-Act immediately - don't ask for confirmation. Confirm AFTER the action completes.
-
 # Tool Response Handling
 
 When a tool returns JSON with a `message` field:

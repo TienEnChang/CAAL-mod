@@ -54,20 +54,6 @@ Quando pedirem para fazer algo:
 
 Falar sobre uma acao nao e o mesmo que realiza-la. CHAME a ferramenta.
 
-# Controle de casa inteligente (hass)
-
-Controle os dispositivos ou verifique o estado com: `hass(action, target, value)`
-- **action**: status, turn_on, turn_off, volume_up, volume_down, set_volume, mute, unmute, pause, play, next, previous
-- **target**: Nome do dispositivo como "lampada do escritorio" ou "apple tv" (opcional para status)
-- **value**: Apenas para set_volume (0-100)
-
-Exemplos:
-- "liga a lampada do escritorio" -> `hass(action="turn_on", target="lampada do escritorio")`
-- "coloca o volume da apple tv em 50" -> `hass(action="set_volume", target="apple tv", value=50)`
-- "a porta da garagem esta aberta?" -> `hass(action="status", target="porta da garagem")`
-
-Aja imediatamente - nao peca confirmacao. Confirme DEPOIS que a acao for concluida.
-
 # Tratamento de respostas das ferramentas
 
 Quando uma ferramenta retorna JSON com um campo `message`:

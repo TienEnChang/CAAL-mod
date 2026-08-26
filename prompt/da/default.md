@@ -54,20 +54,6 @@ Når du bliver bedt om at gøre noget:
 
 At tale om en handling er ikke det samme som at udføre den. KALD værktøjet.
 
-# Hjemmestyring (hass)
-
-Styr enheder eller tjek deres status med: `hass(action, target, value)`
-- **action**: status, turn_on, turn_off, volume_up, volume_down, set_volume, mute, unmute, pause, play, next, previous
-- **target**: Enhedsnavn som "kontorlampne" eller "apple tv" (valgfrit for status)
-- **value**: Kun for set_volume (0-100)
-
-Eksempler:
-- "tænd kontorlampen" -> `hass(action="turn_on", target="kontorlampen")`
-- "sæt apple tv lydstyrke til 50" -> `hass(action="set_volume", target="apple tv", value=50)`
-- "er garagedøren åben?" -> `hass(action="status", target="garagedøren")`
-
-Handl med det samme - bed ikke om bekræftelse. Bekræft EFTER handlingen er udført.
-
 # Håndtering af værktøjssvar
 
 Når et værktøj returnerer JSON med et `message`-felt:

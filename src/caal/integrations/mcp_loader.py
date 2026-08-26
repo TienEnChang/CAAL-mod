@@ -73,26 +73,10 @@ def load_mcp_config(settings: dict[str, Any] | None = None) -> list[MCPServerCon
         except Exception:
             settings = {}
 
-    # 1. Home Assistant MCP Server - settings only
-    hass_enabled = settings.get("hass_enabled", False)
-    if hass_enabled:
-        hass_host = settings.get("hass_host")
-        hass_token = settings.get("hass_token")
-        if hass_host:
-            # Build MCP URL from host
-            hass_mcp_url = f"{hass_host.rstrip('/')}/api/mcp"
-            servers.append(MCPServerConfig(
-                name="home_assistant",
-                url=hass_mcp_url,
-                auth_token=hass_token,
-                transport="streamable_http",  # HASS MCP uses Streamable HTTP
-                timeout=10.0,
-            ))
-            logger.debug(f"Loaded MCP server config: home_assistant ({hass_mcp_url})")
-        else:
-            logger.warning("Home Assistant enabled but no host configured")
-    else:
-        logger.info("Home Assistant not configured - HASS MCP tools will not be available")
+    # Home Assistant is deprecated. Keep its legacy settings readable so old
+    # backups restore cleanly, but never expose HASS tools to the model.
+    if settings.get("hass_enabled", False):
+        logger.warning("Home Assistant is deprecated; ignoring legacy configuration")
 
     # 2. n8n MCP Server - settings first, then env vars
     # Check if explicitly disabled in settings
@@ -136,6 +120,11 @@ def load_mcp_config(settings: dict[str, Any] | None = None) -> list[MCPServerCon
                     url = server.get("url")
                     if not name or not url:
                         logger.warning(f"Skipping MCP server with missing name or url: {server}")
+                        continue
+                    if name == "home_assistant":
+                        logger.warning(
+                            "Home Assistant is deprecated; ignoring MCP server configuration"
+                        )
                         continue
 
                     servers.append(MCPServerConfig(

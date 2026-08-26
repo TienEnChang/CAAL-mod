@@ -54,20 +54,6 @@ Când ți se cere să faci ceva:
 
 A vorbi despre o acțiune nu e același lucru cu a o executa. APELEAZĂ instrumentul.
 
-# Control casă inteligentă (hass)
-
-Controlează dispozitivele sau verifică starea lor cu: `hass(action, target, value)`
-- **action**: status, turn_on, turn_off, volume_up, volume_down, set_volume, mute, unmute, pause, play, next, previous
-- **target**: Numele dispozitivului ca "lampa de birou" sau "apple tv" (opțional pentru status)
-- **value**: Doar pentru set_volume (0-100)
-
-Exemple:
-- "aprinde lampa de birou" -> `hass(action="turn_on", target="lampa de birou")`
-- "pune volumul de la apple tv la 50" -> `hass(action="set_volume", target="apple tv", value=50)`
-- "e deschisă ușa garajului?" -> `hass(action="status", target="ușa garajului")`
-
-Acționează imediat - nu cere confirmare. Confirmă DUPĂ ce acțiunea este finalizată.
-
 # Gestionarea răspunsurilor instrumentelor
 
 Când un instrument returnează JSON cu un câmp `message`:

@@ -212,15 +212,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     status: 'idle',
     error: null,
   });
-  const [hassTest, setHassTest] = useState<{
-    status: TestStatus;
-    error: string | null;
-    info: string | null;
-  }>({
-    status: 'idle',
-    error: null,
-    info: null,
-  });
   const [n8nTest, setN8nTest] = useState<{
     status: TestStatus;
     error: string | null;
@@ -507,36 +498,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       testOpenRouter();
     }
   }, [isOpen, settings.openrouter_api_key, openrouterModels.length, loading, testOpenRouter]);
-
-  const testHass = useCallback(async () => {
-    if (!settings.hass_host || !settings.hass_token) return;
-    setHassTest({ status: 'testing', error: null, info: null });
-
-    try {
-      const res = await fetch('/api/setup/test-hass', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host: settings.hass_host, token: settings.hass_token }),
-      });
-      const result = await res.json();
-
-      if (result.success) {
-        setHassTest({
-          status: 'success',
-          error: null,
-          info: `${t('integrations.connected')} - ${t('integrations.entities', { count: result.device_count })}`,
-        });
-      } else {
-        setHassTest({
-          status: 'error',
-          error: result.error || t('errors.connectionFailed'),
-          info: null,
-        });
-      }
-    } catch {
-      setHassTest({ status: 'error', error: t('errors.connectionFailed'), info: null });
-    }
-  }, [settings.hass_host, settings.hass_token]);
 
   const testN8n = useCallback(async () => {
     if (!settings.n8n_url || !settings.n8n_token) return;
@@ -1649,62 +1610,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
   const renderIntegrationsTab = () => (
     <div className="space-y-6">
-      {/* Home Assistant */}
-      <div>
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-semibold">{t('integrations.homeAssistant')}</h3>
-            <p className="text-muted-foreground text-xs">{t('integrations.homeAssistantDesc')}</p>
-          </div>
-          <Toggle
-            enabled={settings.hass_enabled}
-            onToggle={() => setSettings({ ...settings, hass_enabled: !settings.hass_enabled })}
-          />
-        </div>
-
-        {settings.hass_enabled && (
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">{t('providers.hostUrl')}</label>
-              <input
-                type="text"
-                value={settings.hass_host}
-                onChange={(e) => setSettings({ ...settings, hass_host: e.target.value })}
-                placeholder="http://homeassistant.local:8123"
-                className="input-field text-foreground w-full px-4 py-3 text-sm"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">{t('integrations.longLivedToken')}</label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={settings.hass_token}
-                  onChange={(e) => setSettings({ ...settings, hass_token: e.target.value })}
-                  placeholder="eyJ0eX..."
-                  className="input-field text-foreground flex-1 px-4 py-3 text-sm"
-                />
-                <button
-                  onClick={testHass}
-                  disabled={
-                    !settings.hass_host || !settings.hass_token || hassTest.status === 'testing'
-                  }
-                  className="flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
-                  style={{ background: 'rgb(from var(--surface-2) r g b / 0.5)' }}
-                >
-                  <TestStatusIcon status={hassTest.status} />
-                  {tCommon('test')}
-                </button>
-              </div>
-              {hassTest.error && <p className="text-xs text-red-500">{hassTest.error}</p>}
-              {hassTest.info && <p className="text-xs text-green-500">{hassTest.info}</p>}
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* n8n */}
-      <div className="border-t pt-6">
+      <div>
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h3 className="text-sm font-semibold">{t('integrations.n8n')}</h3>

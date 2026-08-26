@@ -1,14 +1,11 @@
-# Home Assistant Integration
+# Home Assistant Integration (Deprecated)
 
-CAAL integrates with Home Assistant via MCP (Model Context Protocol) using a unified `hass` tool that provides a consistent interface for voice control.
+> Home Assistant support is deprecated and disabled. CAAL no longer loads the
+> `home_assistant` MCP server or exposes the `hass` tool. Legacy configuration
+> fields remain readable so existing backups can still be restored. The details
+> below are retained only as historical implementation notes.
 
-## Quick Start
-
-1. Enable Home Assistant in the setup wizard or settings
-2. Enter your Home Assistant URL (e.g., `http://homeassistant.local:8123`)
-3. Add a Long-Lived Access Token from HA (Settings → Security → Long-lived access tokens)
-
-## How It Works
+## Historical architecture
 
 CAAL connects to Home Assistant's MCP server but exposes a single unified tool to the LLM:
 
