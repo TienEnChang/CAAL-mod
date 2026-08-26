@@ -55,8 +55,9 @@ class MemoryReading:
 @dataclass(frozen=True)
 class MemoryGuardConfig:
     enabled: bool = True
-    min_free_percent: int = 10
+    min_free_percent: int = 20
     max_swap_bytes: int = 4 * GIB
+    max_swap_growth_bytes: int = 1 * GIB
     interval_seconds: float = 20.0
     # Number of consecutive tight readings before acting. Memory pressure spikes
     # briefly during model loads and tool bursts; ending a call on a single
@@ -83,8 +84,9 @@ class MemoryGuardConfig:
         }
         return cls(
             enabled=enabled,
-            min_free_percent=_int("CAAL_MEMORY_MIN_FREE_PERCENT", 10),
+            min_free_percent=_int("CAAL_MEMORY_MIN_FREE_PERCENT", 20),
             max_swap_bytes=_int("CAAL_MEMORY_MAX_SWAP_GB", 4) * GIB,
+            max_swap_growth_bytes=_int("CAAL_MEMORY_MAX_SWAP_GROWTH_GB", 1) * GIB,
             interval_seconds=float(_int("CAAL_MEMORY_CHECK_SECONDS", 20)),
             consecutive_readings=_int("CAAL_MEMORY_TIGHT_READINGS", 3),
         )
@@ -123,7 +125,12 @@ def read_memory() -> MemoryReading:
     return MemoryReading(free_percent=free_percent, swap_used_bytes=swap_used)
 
 
-def evaluate(reading: MemoryReading, config: MemoryGuardConfig) -> str | None:
+def evaluate(
+    reading: MemoryReading,
+    config: MemoryGuardConfig,
+    *,
+    baseline_swap_bytes: int | None = None,
+) -> str | None:
     """Return a human-readable reason if memory is too tight, else None."""
     if not reading.measured:
         return None
@@ -146,6 +153,14 @@ def evaluate(reading: MemoryReading, config: MemoryGuardConfig) -> str | None:
             f"(limit {config.max_swap_bytes / GIB:.2f} GiB)"
         )
 
+    if reading.swap_used_bytes is not None and baseline_swap_bytes is not None:
+        swap_growth = max(0, reading.swap_used_bytes - baseline_swap_bytes)
+        if swap_growth > config.max_swap_growth_bytes:
+            return (
+                f"swap grew by {swap_growth / GIB:.2f} GiB during this call "
+                f"(limit {config.max_swap_growth_bytes / GIB:.2f} GiB)"
+            )
+
     return None
 
 
@@ -166,17 +181,20 @@ async def guard_loop(on_pressure, config: MemoryGuardConfig | None = None) -> No
         return
 
     logger.info(
-        "Memory guard active (min_free=%d%%, max_swap=%.1f GiB, every %.0fs)",
+        "Memory guard active (min_free=%d%%, max_swap=%.1f GiB, "
+        "max_call_swap_growth=%.1f GiB, every %.0fs)",
         config.min_free_percent,
         config.max_swap_bytes / GIB,
+        config.max_swap_growth_bytes / GIB,
         config.interval_seconds,
     )
 
+    baseline_swap_bytes = probe.swap_used_bytes
     tight = 0
     while True:
         await asyncio.sleep(config.interval_seconds)
         reading = await asyncio.to_thread(read_memory)
-        reason = evaluate(reading, config)
+        reason = evaluate(reading, config, baseline_swap_bytes=baseline_swap_bytes)
         if reason is None:
             tight = 0
             continue

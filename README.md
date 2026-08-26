@@ -109,6 +109,19 @@ Use `./start-native.sh --memory-sample` for an immediate deep snapshot. Samples
 are kept in the ignored, rotating `.native/logs/memory.jsonl` file (20 MB plus
 one rotated generation), so no personal transcript or prompt content is logged.
 
+During an active call, the native agent ends the call after sustained memory
+pressure: less than 20% system headroom, more than 4 GiB total swap, or more
+than 1 GiB of new swap growth since that call began. Measuring swap growth
+prevents old swap retained by macOS from immediately ending every new call.
+
+When a call ends, the agent asks the local Qwen server to drop the prompt cache
+that call built up. The system prompt embeds the current wall-clock minute, so a
+finished call's KV cache can never be reused by a later one; releasing it at
+teardown returns the memory immediately instead of holding it until the next
+call happens to evict it. Reuse *within* a call is unaffected. This only applies
+to a Qwen server on this machine - a remote OpenAI-compatible endpoint is left
+alone.
+
 To run n8n workflow tools natively, install the bundled n8n runtime once:
 
 ```bash
