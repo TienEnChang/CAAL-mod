@@ -11,8 +11,9 @@ import {
 import {
   ArrowDownIcon,
   BrainIcon,
-  ChatTextIcon,
   GearIcon,
+  MicrophoneIcon,
+  MicrophoneSlashIcon,
   WaveformIcon,
   WrenchIcon,
 } from '@phosphor-icons/react/dist/ssr';
@@ -30,6 +31,10 @@ import { Toggle } from '@/components/livekit/toggle';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useConversations } from '@/hooks/useConversations';
 import { useToolActivities } from '@/hooks/useToolStatus';
+import {
+  getMicrophoneEnabledPreference,
+  saveMicrophoneEnabledPreference,
+} from '@/lib/microphone-preference';
 import { cn } from '@/lib/utils';
 
 interface FadeProps {
@@ -96,6 +101,9 @@ export const SessionView = ({
   } = useConversations();
   const toolActivities = useToolActivities();
   const [chatOpen, setChatOpen] = useState(true);
+  const [microphoneEnabledPreference, setMicrophoneEnabledPreference] = useState(() =>
+    getMicrophoneEnabledPreference()
+  );
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const shouldFollowLatestRef = useRef(true);
@@ -146,6 +154,11 @@ export const SessionView = ({
     const isNearBottom = distanceFromBottom <= 120;
     shouldFollowLatestRef.current = isNearBottom;
     setShowJumpToLatest(!isNearBottom);
+  }, []);
+
+  const updateMicrophonePreference = useCallback((enabled: boolean) => {
+    saveMicrophoneEnabledPreference(enabled);
+    setMicrophoneEnabledPreference(enabled);
   }, []);
 
   useEffect(() => {
@@ -313,15 +326,19 @@ export const SessionView = ({
           <div className="bg-background relative mx-auto max-w-2xl pb-3 md:pb-12">
             <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
             <div className="border-input/50 dark:border-muted flex items-center gap-2 rounded-[31px] border p-3 drop-shadow-md/3">
-              <Tooltip content={tControlBar('transcript')}>
+              <Tooltip content={tControlBar('toggleMicrophone')}>
                 <Toggle
                   size="icon"
-                  variant="secondary"
-                  aria-label={tControlBar('toggleTranscript')}
-                  pressed={chatOpen}
-                  onPressedChange={setChatOpen}
+                  variant="primary"
+                  aria-label={tControlBar('toggleMicrophone')}
+                  pressed={microphoneEnabledPreference}
+                  onPressedChange={updateMicrophonePreference}
                 >
-                  <ChatTextIcon weight="bold" />
+                  {microphoneEnabledPreference ? (
+                    <MicrophoneIcon weight="bold" />
+                  ) : (
+                    <MicrophoneSlashIcon weight="bold" />
+                  )}
                 </Toggle>
               </Tooltip>
               <Button

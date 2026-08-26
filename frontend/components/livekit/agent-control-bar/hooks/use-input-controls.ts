@@ -6,6 +6,7 @@ import {
   usePersistentUserChoices,
   useTrackToggle,
 } from '@livekit/components-react';
+import { saveMicrophoneEnabledPreference } from '@/lib/microphone-preference';
 
 export interface UseInputControlsProps {
   saveUserChoices?: boolean;
@@ -53,12 +54,8 @@ export function useInputControls({
     };
   }, [localParticipant, microphoneTrack]);
 
-  const {
-    saveAudioInputEnabled,
-    saveVideoInputEnabled,
-    saveAudioInputDeviceId,
-    saveVideoInputDeviceId,
-  } = usePersistentUserChoices({ preventSave: !saveUserChoices });
+  const { saveVideoInputEnabled, saveAudioInputDeviceId, saveVideoInputDeviceId } =
+    usePersistentUserChoices({ preventSave: !saveUserChoices });
 
   const handleAudioDeviceChange = useCallback(
     (deviceId: string) => {
@@ -90,9 +87,9 @@ export function useInputControls({
     async (enabled?: boolean) => {
       await microphoneToggle.toggle(enabled);
       // persist audio input enabled preference
-      saveAudioInputEnabled(!microphoneToggle.enabled);
+      saveMicrophoneEnabledPreference(enabled ?? !microphoneToggle.enabled);
     },
-    [microphoneToggle, saveAudioInputEnabled]
+    [microphoneToggle]
   );
 
   const handleToggleScreenShare = useCallback(

@@ -11,6 +11,10 @@ import {
 import { useConversations } from '@/hooks/useConversations';
 import { useToolActivities } from '@/hooks/useToolStatus';
 import { preferSystemDefaultMicrophone } from '@/lib/default-microphone';
+import {
+  saveMicrophoneEnabledPreference,
+  startSessionWithMicrophonePreference,
+} from '@/lib/microphone-preference';
 import type {
   ConversationSelectionCommand,
   DesktopControlCommand,
@@ -182,8 +186,7 @@ export function DesktopMobileBridge() {
       try {
         if (command.action === 'start_call') {
           if (!session.isConnected) {
-            await preferSystemDefaultMicrophone(session.room);
-            await session.start();
+            await startSessionWithMicrophonePreference(session);
           }
         } else if (command.action === 'end_call') {
           if (session.isConnected) await session.end();
@@ -195,6 +198,7 @@ export function DesktopMobileBridge() {
           await session.room.localParticipant.setMicrophoneEnabled(
             command.microphoneEnabled ?? false
           );
+          saveMicrophoneEnabledPreference(command.microphoneEnabled ?? false);
         } else if (command.action === 'create_conversation') {
           const created = await createConversation();
           if (!created) throw new Error('The desktop could not create a new session');
