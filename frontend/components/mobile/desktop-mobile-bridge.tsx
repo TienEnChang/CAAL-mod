@@ -25,7 +25,14 @@ export function DesktopMobileBridge() {
   const { messages } = useSessionMessages(session);
   const transcriptions = useTranscriptions({ room: session.room });
   const toolActivities = useToolActivities();
-  const { activeId, conversations, createConversation, selectConversation } = useConversations();
+  const {
+    activeId,
+    conversations,
+    createConversation,
+    deleteConversation,
+    renameConversation,
+    selectConversation,
+  } = useConversations();
   const [clientId] = useState(() => crypto.randomUUID());
   const [controlResult, setControlResult] = useState<{
     commandId: string | null;
@@ -62,7 +69,7 @@ export function DesktopMobileBridge() {
 
   const desktopState = useMemo<DesktopControlState>(
     () => ({
-      controlProtocolVersion: 1,
+      controlProtocolVersion: 2,
       clientId,
       connected: session.isConnected,
       agentReady,
@@ -191,6 +198,15 @@ export function DesktopMobileBridge() {
         } else if (command.action === 'create_conversation') {
           const created = await createConversation();
           if (!created) throw new Error('The desktop could not create a new session');
+        } else if (command.action === 'rename_conversation') {
+          const renamed = await renameConversation(
+            command.conversationId ?? '',
+            command.conversationTitle ?? ''
+          );
+          if (!renamed) throw new Error('The desktop could not rename this session');
+        } else if (command.action === 'delete_conversation') {
+          const deleted = await deleteConversation(command.conversationId ?? '');
+          if (!deleted) throw new Error('The desktop could not delete this session');
         }
       } catch (error) {
         commandError = error instanceof Error ? error.message : 'Desktop control failed';
@@ -199,7 +215,7 @@ export function DesktopMobileBridge() {
         setControlResult({ commandId: command.commandId, error: commandError });
       }
     },
-    [createConversation, session]
+    [createConversation, deleteConversation, renameConversation, session]
   );
 
   useEffect(() => {

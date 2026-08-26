@@ -38,7 +38,7 @@ interface ConversationContextValue {
   createConversation: () => Promise<boolean>;
   selectConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<boolean>;
-  deleteConversation: (id: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<boolean>;
   refresh: () => Promise<void>;
 }
 
@@ -225,10 +225,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           );
           return result.active_id;
         });
+        return true;
       } catch (requestError) {
         setError(
           requestError instanceof Error ? requestError.message : 'Unable to delete conversation'
         );
+        return false;
       }
     },
     [reconnectAround]

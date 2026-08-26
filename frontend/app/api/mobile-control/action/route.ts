@@ -6,19 +6,28 @@ const ACTIONS = new Set<DesktopControlAction>([
   'end_call',
   'set_microphone_enabled',
   'create_conversation',
+  'rename_conversation',
+  'delete_conversation',
 ]);
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
     action?: DesktopControlAction;
     microphoneEnabled?: boolean;
+    conversationId?: string;
+    conversationTitle?: string;
   };
   if (!body.action || !ACTIONS.has(body.action)) {
     return NextResponse.json({ error: 'Unsupported desktop control action' }, { status: 400 });
   }
 
   try {
-    const command = mobileControlStore.requestControl(body.action, body.microphoneEnabled);
+    const command = mobileControlStore.requestControl(
+      body.action,
+      body.microphoneEnabled,
+      body.conversationId,
+      body.conversationTitle
+    );
     return NextResponse.json({ status: 'pending', ...command }, { status: 202 });
   } catch (error) {
     return NextResponse.json(

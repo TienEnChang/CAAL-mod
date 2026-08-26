@@ -776,6 +776,7 @@ start_named() {
       prepare_frontend
       echo "Starting CAAL frontend → http://localhost:$FRONTEND_PORT"
       start_service_in "$NEXT_STANDALONE" frontend env \
+        CAAL_PROJECT_DIR="$PROJECT_DIR" \
         LIVEKIT_URL="ws://127.0.0.1:$LIVEKIT_PORT" \
         LIVEKIT_API_KEY="devkey" \
         LIVEKIT_API_SECRET="secret" \

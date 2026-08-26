@@ -41,12 +41,16 @@ export type DesktopControlAction =
   | 'start_call'
   | 'end_call'
   | 'set_microphone_enabled'
-  | 'create_conversation';
+  | 'create_conversation'
+  | 'rename_conversation'
+  | 'delete_conversation';
 
 export interface DesktopControlCommand {
   commandId: string;
   action: DesktopControlAction;
   microphoneEnabled?: boolean;
+  conversationId?: string;
+  conversationTitle?: string;
   createdAt: number;
 }
 
@@ -54,7 +58,7 @@ type Listener = (event: string, data: unknown) => void;
 
 class MobileControlStore {
   private desktop: DesktopControlState = {
-    controlProtocolVersion: 1,
+    controlProtocolVersion: 2,
     clientId: null,
     connected: false,
     agentReady: false,
@@ -127,18 +131,32 @@ class MobileControlStore {
     return command;
   }
 
-  requestControl(action: DesktopControlAction, microphoneEnabled?: boolean): DesktopControlCommand {
+  requestControl(
+    action: DesktopControlAction,
+    microphoneEnabled?: boolean,
+    conversationId?: string,
+    conversationTitle?: string
+  ): DesktopControlCommand {
     if (this.pendingControlCommand) {
       throw new Error('Another desktop control is still in progress');
     }
     if (action === 'set_microphone_enabled' && typeof microphoneEnabled !== 'boolean') {
       throw new Error('microphoneEnabled is required for microphone control');
     }
+    if ((action === 'rename_conversation' || action === 'delete_conversation') && !conversationId) {
+      throw new Error('conversationId is required for this control');
+    }
+    const cleanedTitle = conversationTitle?.trim();
+    if (action === 'rename_conversation' && !cleanedTitle) {
+      throw new Error('A conversation title is required');
+    }
 
     const command: DesktopControlCommand = {
       commandId: crypto.randomUUID(),
       action,
       microphoneEnabled,
+      conversationId,
+      conversationTitle: cleanedTitle,
       createdAt: Date.now(),
     };
     this.pendingControlCommand = command;
