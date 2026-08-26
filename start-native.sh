@@ -73,8 +73,10 @@ LIVEKIT_RTC_PORT_END="${CAAL_LIVEKIT_RTC_PORT_END:-51100}"
 # is what reaches them.
 TAILSCALE_BIN="${CAAL_TAILSCALE_BIN:-$(command -v tailscale || true)}"
 REMOTE_ACCESS="${CAAL_REMOTE_ACCESS:-auto}"   # auto (on when Serve configured), true, false
-PUBLIC_HTTPS_PORT="${CAAL_PUBLIC_HTTPS_PORT:-8443}"
-PUBLIC_LIVEKIT_PORT="${CAAL_PUBLIC_LIVEKIT_PORT:-7443}"
+# Public ports mirror the local ones by default: Serve listens on the tailnet
+# interface while the services listen on loopback, so the numbers can match.
+PUBLIC_HTTPS_PORT="${CAAL_PUBLIC_HTTPS_PORT:-$FRONTEND_PORT}"
+PUBLIC_LIVEKIT_PORT="${CAAL_PUBLIC_LIVEKIT_PORT:-$LIVEKIT_PORT}"
 PUBLIC_HOST="${CAAL_PUBLIC_HOST:-}"           # auto-detected from Tailscale when empty
 
 # auto: run n8n only once it has been installed via --install-n8n.
