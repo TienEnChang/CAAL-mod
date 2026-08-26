@@ -114,6 +114,27 @@ DEFAULT_SETTINGS = {
     "openrouter_model": "",       # Model name (empty = use default)
 }
 
+# Languages Kokoro can speak, and the default voice for each.
+#
+# Kokoro-82M ships voices for 9 language codes (the first letter of the voice
+# name). Of CAAL's languages it covers en/fr/it/pt; Danish and Romanian have no
+# trained voice, so those fall back to Piper. Voice counts are lopsided -
+# French has exactly one - so a language is listed here only if a voice exists.
+KOKORO_VOICE_MAP: dict[str, str] = {
+    "en": "am_puck",
+    "fr": "ff_siwis",
+    "it": "im_nicola",
+    "pt": "pm_alex",
+}
+
+KOKORO_LANGUAGES: frozenset[str] = frozenset(KOKORO_VOICE_MAP)
+
+
+def kokoro_supports(language: str) -> bool:
+    """Whether Kokoro has a trained voice for this language."""
+    return language in KOKORO_LANGUAGES
+
+
 # Per-language Piper TTS voice mapping
 # When adding a new language, add its Piper voice here.
 PIPER_VOICE_MAP: dict[str, str] = {

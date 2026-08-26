@@ -691,8 +691,8 @@ async def get_voices(provider: str | None = None) -> VoicesResponse:
     Returns:
         VoicesResponse with list of voice IDs (Kokoro) or model IDs (Piper)
     """
+    settings = settings_module.load_settings()
     if provider is None:
-        settings = settings_module.load_settings()
         provider = settings.get("tts_provider", "kokoro")
 
     if provider == "piper":
@@ -720,6 +720,20 @@ async def get_voices(provider: str | None = None) -> VoicesResponse:
                 # Object list with id field
                 voices = [v.get("id") or v.get("voice_id") for v in raw_voices]
                 voices = [v for v in voices if v]  # Filter None values
+
+            # A voice name's first letter is its language, and a mismatched one
+            # speaks the wrong phonemes. Offer only voices for the configured
+            # language so the picker cannot produce that state.
+            language = settings.get("language", "en")
+            prefixes = {"en": ("a", "b")}.get(
+                language,
+                (settings_module.KOKORO_VOICE_MAP.get(language, "")[:1],),
+            )
+            prefixes = tuple(p for p in prefixes if p)
+            if prefixes:
+                matching = [v for v in voices if v.startswith(prefixes)]
+                if matching:
+                    voices = matching
 
             return VoicesResponse(voices=voices)
     except Exception as e:

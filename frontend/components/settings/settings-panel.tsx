@@ -83,6 +83,26 @@ type TabId = 'agent' | 'prompt' | 'pipeline' | 'aiProvider' | 'integrations';
 // Constants
 // =============================================================================
 
+// Default Kokoro voice per language. A voice name's first letter is its
+// language code, so these must stay in sync with KOKORO_VOICE_MAP in
+// src/caal/settings.py. Languages absent here have no Kokoro voice.
+const KOKORO_VOICES: Record<string, string> = {
+  en: 'am_puck',
+  fr: 'ff_siwis',
+  it: 'im_nicola',
+  pt: 'pm_alex',
+};
+
+// English accepts both American ("a") and British ("b") voices; every other
+// language has exactly one prefix. Keeps the user's chosen voice when it
+// already matches the language.
+function kokoroVoiceFor(language: string, current: string): string {
+  const fallback = KOKORO_VOICES[language];
+  if (!fallback) return current;
+  const valid = language === 'en' ? ['a', 'b'] : [fallback[0]];
+  return valid.includes(current?.[0]) ? current : fallback;
+}
+
 const DEFAULT_SETTINGS: Settings = {
   agent_name: 'Cal',
   prompt: 'default',
@@ -664,8 +684,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
   const handleLanguageChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLocale = e.target.value;
-    // Switch TTS provider based on language (kokoro=English, piper=French/Italian/etc.)
-    const newTtsProvider = newLocale === 'en' ? 'kokoro' : 'piper';
+    // Kokoro ships trained voices for these languages; the rest need Piper.
+    const newTtsProvider = KOKORO_VOICES[newLocale] ? 'kokoro' : 'piper';
     const piperModels: Record<string, string> = {
       en: 'speaches-ai/piper-en_US-ryan-high',
       fr: 'speaches-ai/piper-fr_FR-siwis-medium',
@@ -679,6 +699,11 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       language: newLocale,
       tts_provider: newTtsProvider,
       tts_voice_piper: piperModels[newLocale] || piperModels['en'],
+      // A Kokoro voice name encodes its language, so carrying the old one over
+      // would speak the new language with the wrong phonemes. Only replace it
+      // when it is actually wrong - otherwise a chosen voice (af_heart) would
+      // be reset to the language default on every language switch.
+      tts_voice_kokoro: kokoroVoiceFor(newLocale, settings.tts_voice_kokoro),
     };
     try {
       await fetch('/api/settings', {

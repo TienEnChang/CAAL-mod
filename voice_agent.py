@@ -502,13 +502,15 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # Create TTS instance based on provider
     tts_provider = runtime["tts_provider"]
 
-    # Auto-switch from Kokoro to Piper for non-English languages when Piper is available
-    if tts_provider == "kokoro" and language != "en":
+    # Kokoro speaks the languages it ships a trained voice for; only the rest
+    # need Piper. Falling back for every non-English language would strand
+    # French, Italian and Portuguese on Piper needlessly.
+    if tts_provider == "kokoro" and not settings_module.kokoro_supports(language):
         # PIPER_URL defaults to SPEACHES_URL; if a dedicated Piper service is configured
         # (PIPER_URL != KOKORO_URL), Piper is available
         if PIPER_URL != KOKORO_URL:
             logger.info(
-                f"Kokoro has limited {language} support, auto-switching to Piper"
+                f"Kokoro has no {language} voice, auto-switching to Piper"
             )
             tts_provider = "piper"
         else:
@@ -527,10 +529,24 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     else:
         # Kokoro uses separate model and voice params
         # Using SyncOpenAITTS to bypass httpx async issues in LiveKit subprocess
+        # The voice name carries the language (ff_siwis is French), so a voice
+        # left over from another language would speak this one with the wrong
+        # phonemes. Fall back to the language's default when they disagree.
+        kokoro_voice = runtime["tts_voice_kokoro"]
+        expected_prefix = settings_module.KOKORO_VOICE_MAP.get(language, "")[:1]
+        if expected_prefix and not kokoro_voice.startswith(expected_prefix):
+            # English accepts both American ("a") and British ("b") voices.
+            if not (language == "en" and kokoro_voice[:1] in {"a", "b"}):
+                kokoro_voice = settings_module.KOKORO_VOICE_MAP[language]
+                logger.info(
+                    f"Kokoro voice {runtime['tts_voice_kokoro']!r} is not a "
+                    f"{language} voice, using {kokoro_voice!r}"
+                )
+        logger.info(f"  TTS voice: Kokoro {kokoro_voice} (lang={language})")
         tts_instance = SyncOpenAITTS(
             base_url=f"{KOKORO_URL}/v1",
             model=TTS_MODEL,
-            voice=runtime["tts_voice_kokoro"],
+            voice=kokoro_voice,
             response_format="wav",
         )
 
