@@ -33,6 +33,12 @@ BIN_DIR="$RUNTIME_DIR/bin"
 CONFIG_DIR="$RUNTIME_DIR/config"
 DATA_DIR="$RUNTIME_DIR/data"
 LOG_DIR="$RUNTIME_DIR/logs"
+# Service logs append across restarts so history survives, and rotate at this
+# size keeping one generation - the same convention the memory monitor uses for
+# memory.jsonl. Truncating instead would discard the log every restart, and a
+# process still holding the old descriptor would write past the new end,
+# leaving the file full of NUL padding.
+LOG_MAX_BYTES="${CAAL_LOG_MAX_BYTES:-20971520}"
 PID_DIR="$RUNTIME_DIR/pids"
 SUPERVISOR_DIR="$RUNTIME_DIR/supervisors"
 
@@ -138,6 +144,7 @@ Port overrides:
   CAAL_WEBHOOK_PORT           Agent webhook API ($WEBHOOK_PORT)
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
   CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
+  CAAL_LOG_MAX_BYTES          Rotate a service log past this size (20 MiB)
   CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
   CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
   CAAL_MEMORY_MIN_FREE_PERCENT     End an active call below this headroom (20)
@@ -589,13 +596,23 @@ prepare_frontend() {
     ln -s ../../static "$NEXT_STANDALONE/.next/static"
 }
 
+rotate_log() {
+  local path="$LOG_DIR/$1.log" size
+  [[ -f "$path" ]] || return 0
+  size="$(stat -f %z "$path" 2>/dev/null || echo 0)"
+  if (( size >= LOG_MAX_BYTES )); then
+    mv -f "$path" "$path.1"
+  fi
+}
+
 start_service() {
   local name="$1"
   shift
+  rotate_log "$name"
   if [[ "${CAAL_LAUNCHD:-false}" == "true" ]]; then
-    "$@" >"$LOG_DIR/$name.log" 2>&1 &
+    "$@" >>"$LOG_DIR/$name.log" 2>&1 &
   else
-    nohup "$@" >"$LOG_DIR/$name.log" 2>&1 &
+    nohup "$@" >>"$LOG_DIR/$name.log" 2>&1 &
   fi
   local pid=$!
   echo "$pid" >"$PID_DIR/$name.pid"
@@ -605,6 +622,7 @@ start_service() {
 start_service_in() {
   local directory="$1" name="$2"
   shift 2
+  rotate_log "$name"
   (
     cd "$directory"
     if [[ "${CAAL_LAUNCHD:-false}" == "true" ]]; then
@@ -612,7 +630,7 @@ start_service_in() {
     else
       exec nohup "$@"
     fi
-  ) >"$LOG_DIR/$name.log" 2>&1 &
+  ) >>"$LOG_DIR/$name.log" 2>&1 &
   local pid=$!
   echo "$pid" >"$PID_DIR/$name.pid"
   echo "  started $name (PID $pid)"
