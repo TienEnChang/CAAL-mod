@@ -64,6 +64,18 @@ LIVEKIT_RTC_TCP_PORT="${CAAL_LIVEKIT_RTC_TCP_PORT:-7881}"
 WEBHOOK_PORT="${CAAL_WEBHOOK_PORT:-8889}"
 FRONTEND_PORT="${CAAL_FRONTEND_PORT:-3000}"
 N8N_PORT="${CAAL_N8N_PORT:-5678}"
+LIVEKIT_RTC_PORT_START="${CAAL_LIVEKIT_RTC_PORT_START:-51000}"
+LIVEKIT_RTC_PORT_END="${CAAL_LIVEKIT_RTC_PORT_END:-51100}"
+
+# Remote access over Tailscale. Browsers only grant microphone access on a
+# secure origin, so phones need HTTPS — which Tailscale Serve terminates using
+# a real cert for the tailnet name. Services keep listening on loopback; Serve
+# is what reaches them.
+TAILSCALE_BIN="${CAAL_TAILSCALE_BIN:-$(command -v tailscale || true)}"
+REMOTE_ACCESS="${CAAL_REMOTE_ACCESS:-auto}"   # auto (on when Serve configured), true, false
+PUBLIC_HTTPS_PORT="${CAAL_PUBLIC_HTTPS_PORT:-8443}"
+PUBLIC_LIVEKIT_PORT="${CAAL_PUBLIC_LIVEKIT_PORT:-7443}"
+PUBLIC_HOST="${CAAL_PUBLIC_HOST:-}"           # auto-detected from Tailscale when empty
 
 # auto: run n8n only once it has been installed via --install-n8n.
 N8N_ENABLED="${CAAL_N8N_ENABLED:-auto}"
@@ -98,6 +110,7 @@ Commands:
   --app                       Start LiveKit, agent, and frontend using healthy models
   --restart <service>         Restart qwen, speech, n8n, livekit, agent, or frontend
   --install-n8n               Install the bundled n8n runtime for workflow tools
+  --setup-remote              Show how to publish CAAL on your tailnet
   --stop                      Stop every native service
   --status                    Show service PIDs and detect untracked CAAL processes
   --attach [all|models|app]   Attach to a persistent supervisor (all by default)
@@ -124,6 +137,125 @@ n8n workflow tools:
   CAAL_N8N_ENABLED            auto (run once installed), true, or false
   CAAL_N8N_VERSION            n8n release to install ($N8N_VERSION)
   Editor: http://127.0.0.1:$N8N_PORT — see docs/N8N-WORKFLOWS.md for setup
+
+Remote access (Tailscale):
+  CAAL_REMOTE_ACCESS          auto (on when Serve is configured), true, false
+  CAAL_PUBLIC_HTTPS_PORT      HTTPS port for the web app ($PUBLIC_HTTPS_PORT)
+  CAAL_PUBLIC_LIVEKIT_PORT    HTTPS port for LiveKit signalling ($PUBLIC_LIVEKIT_PORT)
+  CAAL_PUBLIC_HOST            Override the auto-detected tailnet hostname
+EOF
+}
+
+tailscale_available() {
+  [[ -n "$TAILSCALE_BIN" ]] && "$TAILSCALE_BIN" status >/dev/null 2>&1
+}
+
+# MagicDNS name of this machine, e.g. macbook-pro.tail0cec88.ts.net
+tailscale_dns_name() {
+  [[ -n "$PUBLIC_HOST" ]] && { echo "$PUBLIC_HOST"; return 0; }
+  tailscale_available || return 1
+  "$TAILSCALE_BIN" status --json 2>/dev/null | /usr/bin/python3 -c '
+import json, sys
+try:
+    name = json.load(sys.stdin).get("Self", {}).get("DNSName", "")
+except Exception:
+    sys.exit(1)
+print(name.rstrip("."))
+' 2>/dev/null
+}
+
+tailscale_ip4() {
+  tailscale_available || return 1
+  "$TAILSCALE_BIN" ip -4 2>/dev/null | head -1
+}
+
+serve_is_configured() {
+  tailscale_available || return 1
+  "$TAILSCALE_BIN" serve status 2>/dev/null | grep -q ":$PUBLIC_HTTPS_PORT"
+}
+
+remote_access_enabled() {
+  case "$REMOTE_ACCESS" in
+    false) return 1 ;;
+    true) tailscale_available ;;
+    *) serve_is_configured ;;
+  esac
+}
+
+livekit_public_url() {
+  local host
+  host="$(tailscale_dns_name)" || return 1
+  [[ -n "$host" ]] || return 1
+  echo "wss://$host:$PUBLIC_LIVEKIT_PORT"
+}
+
+# LiveKit needs an explicit node_ip so it advertises ICE candidates the phone
+# can actually reach; without it the media path can end up on loopback.
+write_livekit_config() {
+  local node_ip="$1" file="$CONFIG_DIR/livekit.yaml"
+  {
+    echo "port: $LIVEKIT_PORT"
+    echo "log_level: info"
+    echo "keys:"
+    echo "  devkey: secret"
+    echo "rtc:"
+    echo "  use_external_ip: false"
+    echo "  tcp_port: $LIVEKIT_RTC_TCP_PORT"
+    echo "  port_range_start: $LIVEKIT_RTC_PORT_START"
+    echo "  port_range_end: $LIVEKIT_RTC_PORT_END"
+    [[ -n "$node_ip" ]] && echo "  node_ip: $node_ip"
+  } >"$file"
+  echo "$file"
+}
+
+status_remote_access() {
+  local host url
+  if ! tailscale_available; then
+    echo "remote access: tailscale unavailable"
+    return
+  fi
+  host="$(tailscale_dns_name)"
+  if remote_access_enabled && [[ -n "$host" ]]; then
+    echo "remote access: https://$host:$PUBLIC_HTTPS_PORT"
+    url="$(livekit_public_url)" && echo "  livekit:      $url"
+  else
+    echo "remote access: off (run ./start-native.sh --setup-remote)"
+  fi
+}
+
+# Prints the commands needed to publish CAAL on the tailnet. Serve edits
+# require root, so this does not run them.
+setup_remote_instructions() {
+  local host
+  tailscale_available || {
+    echo "Tailscale is not running or not installed." >&2
+    return 1
+  }
+  host="$(tailscale_dns_name)"
+  [[ -n "$host" ]] || { echo "Could not determine the Tailscale DNS name." >&2; return 1; }
+
+  cat <<EOF
+Publish CAAL on your tailnet by running these once (they need root):
+
+  sudo tailscale set --operator=\$USER
+  tailscale serve --bg --https=$PUBLIC_HTTPS_PORT http://127.0.0.1:$FRONTEND_PORT
+  tailscale serve --bg --https=$PUBLIC_LIVEKIT_PORT http://127.0.0.1:$LIVEKIT_PORT
+
+The first command lets your user manage Serve, so only it needs sudo.
+
+Then restart so LiveKit advertises a reachable address:
+
+  ./start-native.sh --restart livekit
+  ./start-native.sh --restart frontend
+
+On your phone (signed into the same tailnet), open:
+
+  https://$host:$PUBLIC_HTTPS_PORT
+
+To undo:
+
+  tailscale serve --https=$PUBLIC_HTTPS_PORT off
+  tailscale serve --https=$PUBLIC_LIVEKIT_PORT off
 EOF
 }
 
@@ -627,7 +759,7 @@ restart_in_tmux() {
 }
 
 start_named() {
-  local name="$1"
+  local name="$1" node_ip config public_livekit
   validate_service_dependency "$name"
   case "$name" in
     qwen)
@@ -663,9 +795,18 @@ start_named() {
         "$N8N_NODE_BIN" "$N8N_BIN" start
       ;;
     livekit)
-      echo "Starting LiveKit → ws://127.0.0.1:$LIVEKIT_PORT"
-      start_service livekit "$LIVEKIT_BIN" --dev --bind 127.0.0.1 \
-        --port "$LIVEKIT_PORT" --rtc.tcp_port "$LIVEKIT_RTC_TCP_PORT"
+      if remote_access_enabled; then
+        # Signalling stays on loopback behind Tailscale Serve; only the media
+        # ports are reached directly over the tailnet.
+        node_ip="$(tailscale_ip4)"
+        config="$(write_livekit_config "$node_ip")"
+        echo "Starting LiveKit → ws://127.0.0.1:$LIVEKIT_PORT (advertising $node_ip)"
+        start_service livekit "$LIVEKIT_BIN" --config "$config" --bind 127.0.0.1
+      else
+        echo "Starting LiveKit → ws://127.0.0.1:$LIVEKIT_PORT"
+        start_service livekit "$LIVEKIT_BIN" --dev --bind 127.0.0.1 \
+          --port "$LIVEKIT_PORT" --rtc.tcp_port "$LIVEKIT_RTC_TCP_PORT"
+      fi
       ;;
     agent)
       echo "Starting CAAL agent → http://127.0.0.1:$WEBHOOK_PORT"
@@ -673,12 +814,18 @@ start_named() {
       ;;
     frontend)
       prepare_frontend
+      # Only used for HTTPS requests, so local http:// access keeps deriving
+      # ws://<host>:7880 and is unaffected.
+      public_livekit="auto"
+      if remote_access_enabled; then
+        public_livekit="$(livekit_public_url)" || public_livekit="auto"
+      fi
       echo "Starting CAAL frontend → http://localhost:$FRONTEND_PORT"
       start_service_in "$NEXT_STANDALONE" frontend env \
         LIVEKIT_URL="ws://127.0.0.1:$LIVEKIT_PORT" \
         LIVEKIT_API_KEY="devkey" \
         LIVEKIT_API_SECRET="secret" \
-        NEXT_PUBLIC_LIVEKIT_URL="auto" \
+        NEXT_PUBLIC_LIVEKIT_URL="$public_livekit" \
         LIVEKIT_PUBLIC_PORT="$LIVEKIT_PORT" \
         WEBHOOK_URL="http://127.0.0.1:$WEBHOOK_PORT" \
         HOSTNAME="127.0.0.1" \
@@ -830,6 +977,10 @@ case "${1:-}" in
     install_n8n
     exit 0
     ;;
+  --setup-remote)
+    setup_remote_instructions
+    exit 0
+    ;;
   --stop)
     if [[ "$TMUX_CHILD" != true ]] && launchd_is_loaded; then
       exec "$PROJECT_DIR/launchd/manage.sh" stop
@@ -844,6 +995,7 @@ case "${1:-}" in
     status_supervisors
     status_tmux_sessions
     status_launchd
+    status_remote_access
     exit 0
     ;;
   --attach)
