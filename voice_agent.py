@@ -66,7 +66,13 @@ from caal.integrations import (  # noqa: E402
 )
 from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
-from caal.memory_guard import guard_loop  # noqa: E402
+from caal.memory_guard import (  # noqa: E402
+    MemoryGuardConfig,
+    evaluate,
+    guard_loop,
+    read_memory,
+    wait_for_recovery,
+)
 from caal.qwen_cache import clear_local_qwen_cache  # noqa: E402
 from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
@@ -267,8 +273,23 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         # replay window. llm_node injects this into the system prompt.
         self._conversation_recall = recall_block(conversation_summary)
 
+        # Set to the trip reason when the memory guard ends this session. The
+        # session is finished at that point, so no further turn may reach the
+        # model - another generation is exactly what the machine cannot afford.
+        self._memory_terminated: str | None = None
+
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Custom LLM node using provider-agnostic interface."""
+        if self._memory_terminated:
+            logger.warning(
+                f"Refusing turn, session ended for memory: {self._memory_terminated}"
+            )
+            yield (
+                "I ran out of memory and had to end that session. "
+                "Start a new call and I'll pick up where we left off."
+            )
+            return
+
         async for chunk in llm_node(
             self,
             chat_ctx,
@@ -362,6 +383,15 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # Set GROQ_API_KEY env var for plugins that read from environment
     if runtime.get("groq_api_key"):
         os.environ["GROQ_API_KEY"] = runtime["groq_api_key"]
+
+    memory_config = MemoryGuardConfig.from_env()
+    # MLX memory is only readable from a Qwen server on this machine; a remote
+    # OpenAI-compatible endpoint has no such signal and none is guessed.
+    qwen_base_url = (
+        runtime["openai_base_url"]
+        if runtime["llm_provider"] == "openai_compatible"
+        else None
+    )
 
     # Create CAALLLM instance (provider-agnostic wrapper)
     caal_llm = CAALLLM.from_settings(runtime)
@@ -848,6 +878,19 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         """Sync wrapper for async webhook command handler."""
         asyncio.create_task(_handle_webhook_command(data))
 
+    # Step 6 of a memory trip: do not resume until memory has recovered. A
+    # previous session may have ended moments ago and the machine may still be
+    # paying for it, so starting straight into another one would trip again.
+    if memory_config.enabled:
+        probe = await asyncio.to_thread(read_memory, qwen_base_url)
+        if evaluate(probe, memory_config) is not None:
+            logger.warning("Memory still under pressure - waiting before starting")
+            if not await wait_for_recovery(memory_config, qwen_base_url):
+                logger.warning(
+                    "Memory did not recover in time; starting anyway so the user "
+                    "is not left with a call that never connects"
+                )
+
     # Start session AFTER handlers are registered
     await session.start(
         room=ctx.room,
@@ -872,18 +915,53 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # the call and let the next one start fresh from rehydrated history.
 
     async def _end_call_for_memory(reason: str) -> None:
-        logger.warning(f"Ending call under memory pressure: {reason}")
-        try:
-            await session.say(
-                "I'm running low on memory, so I'll end here. "
-                "Start a new call and I'll pick up where we left off.",
-                add_to_chat_ctx=False,
-            )
-        except Exception as e:
-            logger.warning(f"Could not announce memory shutdown: {e}")
-        close_event.set()
+        """Terminate this session on a memory trip.
 
-    memory_guard_task = asyncio.create_task(guard_loop(_end_call_for_memory))
+        mlx-lm exposes no way to cancel an in-flight request, so a generation
+        already under way is left to fail against the MLX ceiling rather than
+        being allowed to finish.
+
+        The retained cache is released by the shared teardown below rather than
+        here: the session is already terminated, so Qwen allocates nothing more
+        in the meantime, and clearing early would not touch an in-flight
+        request's own cache anyway.
+        """
+        logger.warning(f"Memory guard tripped, ending session: {reason}")
+
+        # Mark terminated so llm_node refuses any further turn.
+        assistant._memory_terminated = reason
+
+        # Surface it as system text in the transcript rather than speech. The
+        # "tool" role is the transcript's system-activity lane and is already
+        # excluded from context and summary queries, so this is display-only and
+        # never reaches the model. Speaking it would also mean holding the call
+        # open for several seconds of TTS purely to narrate its own ending.
+        try:
+            conversation_store.append_message(
+                conversation_id,
+                role="tool",
+                content=f"Session ended - {reason}",
+                message_id=f"memory_guard_{uuid.uuid4().hex}",
+                metadata={"kind": "memory_guard", "reason": reason, "status": "failed"},
+            )
+            await _publish_conversation_updated()
+        except Exception as e:
+            logger.warning(f"Could not record memory shutdown notice: {e}")
+
+        # End the session the same way a hang-up does, so both paths run the
+        # same teardown: closing it fires the "close" handler, which sets
+        # close_event. Setting the event directly would leave the session open
+        # and skip that handler, making a tripped call tear down differently
+        # from every other call for no reason.
+        try:
+            await asyncio.wait_for(session.aclose(), timeout=10)
+        except Exception as e:
+            logger.warning(f"Could not close session cleanly: {e}")
+            close_event.set()
+
+    memory_guard_task = asyncio.create_task(
+        guard_loop(_end_call_for_memory, memory_config, qwen_base_url)
+    )
 
     # Wait until session closes (room disconnects, memory pressure, etc.)
     try:

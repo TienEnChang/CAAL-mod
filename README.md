@@ -109,10 +109,31 @@ Use `./start-native.sh --memory-sample` for an immediate deep snapshot. Samples
 are kept in the ignored, rotating `.native/logs/memory.jsonl` file (20 MB plus
 one rotated generation), so no personal transcript or prompt content is logged.
 
-During an active call, the native agent ends the call after sustained memory
-pressure: less than 20% system headroom, more than 4 GiB total swap, or more
-than 1 GiB of new swap growth since that call began. Measuring swap growth
-prevents old swap retained by macOS from immediately ending every new call.
+During an active call the native agent watches three trip signals and ends the
+session if any one of them fires:
+
+- Qwen's own allocation reaching 6 GiB
+- less than 20% system memory available
+- more than 1 GiB of new swap since the session began
+
+They are three views of one failure, not three separate protections. Only the
+first leads: MLX's allocation is measurable before the system reacts. Available
+memory lags, because evicting pages to swap *raises* the free percentage, so it
+reports the result of the pressure rather than its cause. Swap growth trails by
+definition and can confirm the failure but never prevent it. Measuring growth
+rather than absolute swap keeps old swap, which macOS retains long after the
+fact, from ending every new session.
+
+Prevention rests on the cap rather than the guard: Qwen is launched with its
+wired memory clamped to 6 GiB (`CAAL_QWEN_WIRED_LIMIT_GB`), well below the
+11.84 GiB mlx-lm would otherwise pin. Wired pages cannot be paged out, so an
+unclamped Qwen makes room by evicting every other process to swap. Inside the
+cap it reclaims its own cache instead.
+
+On a trip the session is marked terminated, further turns are refused, the
+retained cache is released at once, and a new session waits for memory to
+recover before starting. An in-flight request is left to fail against the MLX
+ceiling, since mlx-lm cannot cancel one.
 
 When a call ends, the agent asks the local Qwen server to drop the prompt cache
 that call built up. The system prompt embeds the current wall-clock minute, so a

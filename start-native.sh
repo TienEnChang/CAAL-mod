@@ -145,11 +145,20 @@ Port overrides:
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
   CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
   CAAL_LOG_MAX_BYTES          Rotate a service log past this size (20 MiB)
+  CAAL_SWAP_RESTART_GB        Backstop: restart Qwen past this swap growth (3, 0 disables)
+  CAAL_QWEN_WIRED_LIMIT_GB    Cap on Qwen's wired memory (6)
+  CAAL_QWEN_MEMORY_LIMIT_GB   Cap on Qwen's allocations (7)
   CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
   CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
-  CAAL_MEMORY_MIN_FREE_PERCENT     End an active call below this headroom (20)
-  CAAL_MEMORY_MAX_SWAP_GB          Emergency absolute swap ceiling (4)
-  CAAL_MEMORY_MAX_SWAP_GROWTH_GB   Per-call swap growth ceiling (1)
+  Memory guard - a session ends if any one of these trips:
+  CAAL_QWEN_MEMORY_TRIP_GB         Qwen's own allocation ceiling (6)
+  CAAL_MEMORY_MIN_FREE_PERCENT     End a session below this headroom (20)
+  CAAL_MEMORY_MAX_SWAP_GROWTH_GB   Per-session swap growth ceiling (1)
+  CAAL_MEMORY_GUARD                false to disable the guard entirely
+  CAAL_MEMORY_CHECK_SECONDS        Seconds between guard samples (2)
+  CAAL_MEMORY_TIGHT_READINGS       Consecutive trips before acting (2)
+  CAAL_MEMORY_RECOVERY_FREE_PERCENT  Headroom needed to resume (30)
+  CAAL_MEMORY_RECOVERY_TIMEOUT     Seconds to wait for recovery (120)
 
 n8n workflow tools:
   CAAL_N8N_ENABLED            auto (run once installed), true, or false
