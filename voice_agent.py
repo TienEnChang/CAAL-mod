@@ -67,6 +67,7 @@ from caal.integrations import (  # noqa: E402
 from caal.llm import ToolDataCache, llm_node  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
 from caal.memory_guard import guard_loop  # noqa: E402
+from caal.qwen_cache import clear_local_qwen_cache  # noqa: E402
 from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
 
@@ -889,6 +890,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         await close_event.wait()
     finally:
         memory_guard_task.cancel()
+        if runtime["llm_provider"] == "openai_compatible":
+            await asyncio.to_thread(
+                clear_local_qwen_cache,
+                runtime["openai_base_url"],
+            )
     # Returning from the entrypoint does not finalize a LiveKit job. Explicitly
     # shut it down so its agent participant leaves the room before the desktop
     # reconnects for a different conversation. Otherwise the stale participant

@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 SERVICE_MARKERS = {
-    "qwen": ("mlx_lm", "server"),
+    # Matches both the CAAL launcher wrapper (scripts/mlx_qwen_server.py)
+    # and a stock "-m mlx_lm server" invocation. The pid file already
+    # pins the process; these markers only guard against a reused pid.
+    "qwen": ("mlx", "server"),
     "speech": ("local_speech_server.py",),
     "n8n": ("n8n/bin/n8n",),
     "livekit": ("livekit-server",),

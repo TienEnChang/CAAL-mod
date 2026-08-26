@@ -140,6 +140,9 @@ Port overrides:
   CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
   CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
   CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
+  CAAL_MEMORY_MIN_FREE_PERCENT     End an active call below this headroom (20)
+  CAAL_MEMORY_MAX_SWAP_GB          Emergency absolute swap ceiling (4)
+  CAAL_MEMORY_MAX_SWAP_GROWTH_GB   Per-call swap growth ceiling (1)
 
 n8n workflow tools:
   CAAL_N8N_ENABLED            auto (run once installed), true, or false
@@ -380,7 +383,7 @@ pid_matches_service() {
   kill -0 "$pid" 2>/dev/null || return 1
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   case "$name:$command" in
-    qwen:*mlx_lm*server*) return 0 ;;
+    qwen:*mlx_qwen_server.py*|qwen:*mlx_lm*server*) return 0 ;;
     speech:*local_speech_server.py*) return 0 ;;
     n8n:*n8n/bin/n8n*) return 0 ;;
     livekit:*livekit-server*) return 0 ;;
@@ -732,7 +735,7 @@ start_named() {
   case "$name" in
     qwen)
       echo "Starting Qwen: $QWEN_MODEL → http://127.0.0.1:$QWEN_PORT/v1"
-      start_service qwen "$MODEL_PYTHON" -m mlx_lm server \
+      start_service qwen "$MODEL_PYTHON" "$PROJECT_DIR/scripts/mlx_qwen_server.py" \
         --model "$QWEN_MODEL" --host 127.0.0.1 --port "$QWEN_PORT" \
         --prompt-cache-size "$QWEN_PROMPT_CACHE_SIZE"
       ;;
