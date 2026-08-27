@@ -35,7 +35,7 @@ async def checkpoint_conversation_summary(
     provider: LLMProvider,
 ) -> str | None:
     """Summarize one bounded durable delta and atomically advance its checkpoint."""
-    summary, summarized_through = store.get_summary(conversation_id)
+    summary, summarized_through, summary_revision = store.get_summary_state(conversation_id)
     max_chars = int(
         os.getenv("HISTORY_SUMMARY_INPUT_MAX_CHARS", str(SUMMARY_INPUT_MAX_CHARS))
     )
@@ -96,6 +96,7 @@ async def checkpoint_conversation_summary(
         updated,
         through_rowid=through_rowid,
         expected_through_rowid=summarized_through,
+        expected_revision=summary_revision,
     )
     if not saved:
         logger.info("Discarded a stale concurrent conversation summary")

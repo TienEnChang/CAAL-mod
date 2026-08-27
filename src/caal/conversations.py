@@ -19,7 +19,7 @@ DEFAULT_REHYDRATE_MAX_CHARS = 1500
 class ContextWindow:
     """The bounded transcript replayed to the model on reconnect."""
 
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     truncated: bool
     oldest_rowid: int | None
 
@@ -57,7 +57,8 @@ class ConversationStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     summary TEXT,
-                    summary_through_rowid INTEGER NOT NULL DEFAULT 0
+                    summary_through_rowid INTEGER NOT NULL DEFAULT 0,
+                    summary_revision INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -89,6 +90,11 @@ class ConversationStore:
                 connection.execute(
                     "ALTER TABLE conversations "
                     "ADD COLUMN summary_through_rowid INTEGER NOT NULL DEFAULT 0"
+                )
+            if "summary_revision" not in columns:
+                connection.execute(
+                    "ALTER TABLE conversations "
+                    "ADD COLUMN summary_revision INTEGER NOT NULL DEFAULT 0"
                 )
 
     @staticmethod
@@ -276,7 +282,7 @@ class ConversationStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT rowid, role, content
+                SELECT rowid, id, role, content, created_at
                 FROM messages
                 WHERE conversation_id = ?
                   AND role IN ('user', 'assistant')
@@ -348,7 +354,7 @@ class ConversationStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT rowid, role, content
+                SELECT rowid, id, role, content, created_at
                 FROM messages
                 WHERE conversation_id = ?
                   AND role IN ('user', 'assistant')
@@ -389,7 +395,12 @@ class ConversationStore:
         selected.reverse()
         return ContextWindow(
             messages=[
-                {"role": str(row["role"]), "content": str(row["content"])}
+                {
+                    "id": str(row["id"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "created_at": float(row["created_at"]),
+                }
                 for row in selected
             ],
             truncated=len(selected) < total,
@@ -405,10 +416,15 @@ class ConversationStore:
         return self.context_window(conversation_id, limit=limit).messages
 
     def get_summary(self, conversation_id: str) -> tuple[str | None, int]:
+        summary, through_rowid, _ = self.get_summary_state(conversation_id)
+        return summary, through_rowid
+
+    def get_summary_state(self, conversation_id: str) -> tuple[str | None, int, int]:
+        """Return summary, checkpoint, and the source revision used for CAS."""
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT summary, summary_through_rowid
+                SELECT summary, summary_through_rowid, summary_revision
                 FROM conversations
                 WHERE id = ?
                 """,
@@ -416,7 +432,11 @@ class ConversationStore:
             ).fetchone()
         if not row:
             raise KeyError(conversation_id)
-        return row["summary"], int(row["summary_through_rowid"] or 0)
+        return (
+            row["summary"],
+            int(row["summary_through_rowid"] or 0),
+            int(row["summary_revision"] or 0),
+        )
 
     def unsummarized_messages(
         self,
@@ -487,6 +507,7 @@ class ConversationStore:
         *,
         through_rowid: int,
         expected_through_rowid: int | None = None,
+        expected_revision: int | None = None,
     ) -> bool:
         text = summary.strip()
         if not text:
@@ -502,19 +523,77 @@ class ConversationStore:
                     (text, through_rowid, conversation_id, through_rowid),
                 )
             else:
+                revision_clause = (
+                    " AND summary_revision = ?" if expected_revision is not None else ""
+                )
+                parameters: tuple[Any, ...] = (
+                    text,
+                    through_rowid,
+                    conversation_id,
+                    expected_through_rowid,
+                )
+                if expected_revision is not None:
+                    parameters += (expected_revision,)
                 cursor = connection.execute(
-                    """
+                    f"""
                     UPDATE conversations
                     SET summary = ?, summary_through_rowid = ?
-                    WHERE id = ? AND summary_through_rowid = ?
+                    WHERE id = ? AND summary_through_rowid = ?{revision_clause}
                     """,
-                    (text, through_rowid, conversation_id, expected_through_rowid),
+                    parameters,
                 )
             if not cursor.rowcount and not connection.execute(
                 "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone():
                 raise KeyError(conversation_id)
             return bool(cursor.rowcount)
+
+    def delete_message(self, conversation_id: str, message_id: str) -> dict[str, Any]:
+        """Erase one turn so a misheard line cannot reach later model calls.
+
+        A message already folded into the durable summary lives on inside that
+        text, so deleting one at or before the checkpoint drops the summary and
+        rewinds the checkpoint; the rolling summarizer rebuilds it from what
+        remains.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT rowid, role FROM messages "
+                "WHERE id = ? AND conversation_id = ? "
+                "AND role IN ('user', 'assistant')",
+                (message_id, conversation_id),
+            ).fetchone()
+            if not row:
+                raise KeyError(message_id)
+            deleted_rowid = int(row["rowid"])
+            connection.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+
+            summarized_through = int(
+                connection.execute(
+                    "SELECT summary_through_rowid FROM conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()["summary_through_rowid"]
+                or 0
+            )
+            summary_invalidated = deleted_rowid <= summarized_through
+            if summary_invalidated:
+                connection.execute(
+                    "UPDATE conversations "
+                    "SET summary = NULL, summary_through_rowid = 0, "
+                    "summary_revision = summary_revision + 1, updated_at = ? "
+                    "WHERE id = ?",
+                    (time.time(), conversation_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE conversations SET updated_at = ?, "
+                    "summary_revision = summary_revision + 1 WHERE id = ?",
+                    (time.time(), conversation_id),
+                )
+        return {
+            "deleted_id": message_id,
+            "summary_invalidated": summary_invalidated,
+        }
 
     def delete(self, conversation_id: str) -> str:
         with self._connect() as connection:

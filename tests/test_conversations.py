@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from caal.conversations import ConversationStore
 
 
@@ -174,18 +176,37 @@ def test_rehydration_uses_only_bounded_messages_after_summary_checkpoint(tmp_pat
         through_rowid=first["rowid"],
     )
     store.append_message(conversation_id, role="assistant", content="Recent answer")
-    store.append_message(conversation_id, role="user", content="Latest question")
+    store.append_message(
+        conversation_id,
+        role="user",
+        content="Latest question",
+        message_id="latest",
+        created_at=30,
+    )
 
     window = store.rehydration_window(conversation_id, limit=1, max_chars=100)
 
-    assert window.messages == [{"role": "user", "content": "Latest question"}]
+    assert window.messages == [
+        {
+            "id": "latest",
+            "role": "user",
+            "content": "Latest question",
+            "created_at": 30.0,
+        }
+    ]
     assert window.truncated is True
 
 
 def test_interrupted_assistant_output_is_not_rehydrated(tmp_path):
     store = ConversationStore(tmp_path / "conversations.sqlite3")
     conversation_id = store.ensure_active()
-    store.append_message(conversation_id, role="user", content="Question")
+    store.append_message(
+        conversation_id,
+        role="user",
+        content="Question",
+        message_id="question",
+        created_at=10,
+    )
     store.append_message(
         conversation_id,
         role="assistant",
@@ -194,7 +215,12 @@ def test_interrupted_assistant_output_is_not_rehydrated(tmp_path):
     )
 
     assert store.rehydration_window(conversation_id).messages == [
-        {"role": "user", "content": "Question"}
+        {
+            "id": "question",
+            "role": "user",
+            "content": "Question",
+            "created_at": 10.0,
+        }
     ]
 
 
@@ -262,4 +288,72 @@ def test_existing_database_is_migrated_for_summaries(tmp_path):
     store = ConversationStore(database_path)
     conversation_id = store.ensure_active()
 
+    assert store.get_summary(conversation_id) == (None, 0)
+
+
+def test_deleting_a_message_removes_it_from_rehydrated_context(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(
+        conversation_id, role="user", content="misheard", message_id="bad"
+    )
+    store.append_message(conversation_id, role="assistant", content="answer")
+
+    result = store.delete_message(conversation_id, "bad")
+
+    assert result["deleted_id"] == "bad"
+    assert result["summary_invalidated"] is False
+    contents = [
+        message["content"]
+        for message in store.rehydration_window(conversation_id).messages
+    ]
+    assert contents == ["answer"]
+
+
+def test_deleting_a_summarized_message_drops_the_summary(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(
+        conversation_id, role="user", content="misheard", message_id="bad"
+    )
+    rowid = store.unsummarized_messages(
+        conversation_id, after_rowid=0, max_chars=100
+    )[0]["rowid"]
+    store.save_summary(conversation_id, "Contaminated summary", through_rowid=rowid)
+
+    assert store.delete_message(conversation_id, "bad")["summary_invalidated"] is True
+    assert store.get_summary(conversation_id) == (None, 0)
+
+
+def test_deleting_an_unknown_message_raises(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+
+    with pytest.raises(KeyError):
+        store.delete_message(conversation_id, "missing")
+
+
+def test_deleting_a_message_rejects_an_inflight_stale_summary(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(
+        conversation_id, role="user", content="misheard", message_id="bad"
+    )
+    _, checkpoint, revision = store.get_summary_state(conversation_id)
+    through_rowid = store.unsummarized_messages(
+        conversation_id, after_rowid=checkpoint, max_chars=100
+    )[0]["rowid"]
+
+    store.delete_message(conversation_id, "bad")
+
+    assert (
+        store.save_summary(
+            conversation_id,
+            "Stale summary containing the deleted turn",
+            through_rowid=through_rowid,
+            expected_through_rowid=checkpoint,
+            expected_revision=revision,
+        )
+        is False
+    )
     assert store.get_summary(conversation_id) == (None, 0)

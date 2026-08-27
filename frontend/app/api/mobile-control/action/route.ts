@@ -8,6 +8,7 @@ const ACTIONS = new Set<DesktopControlAction>([
   'create_conversation',
   'rename_conversation',
   'delete_conversation',
+  'delete_message',
 ]);
 
 export async function POST(request: NextRequest) {
@@ -16,6 +17,7 @@ export async function POST(request: NextRequest) {
     microphoneEnabled?: boolean;
     conversationId?: string;
     conversationTitle?: string;
+    messageId?: string;
   };
   if (!body.action || !ACTIONS.has(body.action)) {
     return NextResponse.json({ error: 'Unsupported desktop control action' }, { status: 400 });
@@ -26,7 +28,8 @@ export async function POST(request: NextRequest) {
       body.action,
       body.microphoneEnabled,
       body.conversationId,
-      body.conversationTitle
+      body.conversationTitle,
+      body.messageId
     );
     return NextResponse.json({ status: 'pending', ...command }, { status: 202 });
   } catch (error) {

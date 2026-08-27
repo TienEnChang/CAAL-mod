@@ -412,6 +412,29 @@ async def update_conversation(
     return result
 
 
+@app.delete("/conversations/{conversation_id}/messages/{message_id}")
+async def delete_conversation_message(
+    conversation_id: str, message_id: str, room_name: str = "voice_assistant_room"
+) -> dict:
+    """Erase one stored turn, and drop it from a live session's context."""
+    try:
+        result = get_conversation_store().delete_message(conversation_id, message_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Message not found") from exc
+
+    # A call in progress keeps its own copy of the transcript, so the delete has
+    # to reach the agent too. No live session simply means nothing to forget.
+    forwarded, _ = await send_agent_command(
+        room_name,
+        {
+            "action": "forget_message",
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+        },
+    )
+    return {**result, "forwarded_to_session": forwarded}
+
+
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str) -> dict[str, str]:
     """Delete a conversation and select the newest remaining conversation."""

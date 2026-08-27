@@ -41,7 +41,7 @@ async def warm_prompt_prefix(
     stable_prompt: str,
     tools: list[dict[str, Any]] | None,
     session_context: str | None = None,
-    history: list[dict[str, str]] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Run one bounded inference whose prefix matches the next production call."""
     messages: list[dict[str, Any]] = [
@@ -50,7 +50,10 @@ async def warm_prompt_prefix(
             "content": compose_system_prompt(stable_prompt, session_context),
         }
     ]
-    messages.extend(history or [])
+    messages.extend(
+        {"role": message["role"], "content": message["content"]}
+        for message in (history or [])
+    )
     messages.append(
         {
             "role": "user",

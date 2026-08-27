@@ -644,6 +644,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         chat_ctx.add_message(
             role=saved_message["role"],
             content=saved_message["content"],
+            id=saved_message["id"],
+            created_at=saved_message["created_at"],
         )
 
     # Set session reference for wake word callback
@@ -758,12 +760,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     else:
         logger.info("Short-term memory initialized (empty)")
 
+    session_date_context = settings_module.load_session_date_context(
+        timezone_id=TIMEZONE_ID,
+        timezone_display=TIMEZONE_DISPLAY,
+        language=language,
+    )
     session_context = build_session_context(
-        settings_module.load_session_date_context(
-            timezone_id=TIMEZONE_ID,
-            timezone_display=TIMEZONE_DISPLAY,
-            language=language,
-        ),
+        session_date_context,
         user_memory=short_term_memory.get_context_message(),
         conversation_recall=recall_block(conversation_summary),
     )
@@ -799,6 +802,22 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             )
         except Exception as e:
             logger.debug(f"Failed to publish conversation update: {e}")
+
+    # Prompt-cache readiness is session status, not conversation content, so it
+    # is announced on its own topic instead of being written into the history.
+    session_cache_state = "loading"
+
+    async def _publish_session_cache_state() -> None:
+        import json
+
+        try:
+            await ctx.room.local_participant.publish_data(
+                json.dumps({"status": session_cache_state}).encode("utf-8"),
+                reliable=True,
+                topic="session_cache",
+            )
+        except Exception as e:
+            logger.debug(f"Failed to publish session cache state: {e}")
 
     rolling_summary_next_attempt = 0.0
 
@@ -894,7 +913,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     async def _handle_webhook_command(data: rtc.DataPacket) -> None:
         """Handle commands from webhook server via LiveKit data channel."""
-        nonlocal call_tools
+        nonlocal call_tools, rolling_summary_task
         if data.topic != "webhook_command":
             return
 
@@ -915,6 +934,46 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 greetings = get_wake_greetings(lang)
                 greeting = random.choice(greetings)
                 await session.say(greeting)
+
+            elif action == "forget_message":
+                # A deleted turn has to leave the live context too, or a
+                # misheard line keeps steering the rest of the call.
+                target_conversation = cmd.get("conversation_id")
+                if target_conversation not in (None, conversation_id):
+                    return
+                message_id = cmd.get("message_id")
+                if not message_id:
+                    return
+
+                # A summary request that started before the delete may still
+                # contain the erased turn. Stop it before rebuilding the live
+                # prompt; a later checkpoint will summarize the durable rows.
+                if rolling_summary_task and not rolling_summary_task.done():
+                    rolling_summary_task.cancel()
+                    await asyncio.gather(rolling_summary_task, return_exceptions=True)
+
+                current_items = assistant.chat_ctx.items
+                kept = [
+                    item
+                    for item in current_items
+                    if getattr(item, "id", None) != message_id
+                ]
+                if len(kept) != len(current_items):
+                    await assistant.update_chat_ctx(llm.ChatContext(kept))
+
+                # If the row had already been summarized, the store invalidated
+                # that summary. Rebuild the variable session prefix so the old
+                # summary cannot keep influencing this call.
+                current_summary, _ = conversation_store.get_summary(conversation_id)
+                assistant._session_context = build_session_context(
+                    session_date_context,
+                    user_memory=short_term_memory.get_context_message(),
+                    conversation_recall=recall_block(current_summary),
+                )
+                logger.info(
+                    "Forgot %s context item(s) after a history delete",
+                    len(current_items) - len(kept),
+                )
 
             elif action == "reload_tools":
                 # Clear agent's internal caches
@@ -950,6 +1009,18 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         except Exception as e:
             logger.error(f"Failed to process webhook command: {e}")
 
+    @ctx.room.on("participant_connected")
+    def on_participant_connected(participant: rtc.RemoteParticipant) -> None:
+        """Re-announce history to arrivals that missed earlier packets.
+
+        Data packets only reach participants already in the room. The
+        prompt cache often finishes warming moments after the job starts,
+        usually before the browser has finished joining, so without this the UI
+        would sit on a stale transcript and an unknown cache state.
+        """
+        asyncio.create_task(_publish_conversation_updated())
+        asyncio.create_task(_publish_session_cache_state())
+
     @ctx.room.on("data_received")
     def on_data_received(data: rtc.DataPacket) -> None:
         """Sync wrapper for async webhook command handler."""
@@ -962,6 +1033,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     async def _warm_session_prefix() -> None:
+        nonlocal session_cache_state
+        await _publish_session_cache_state()
         async with inference_lock:
             warmed = await warm_prompt_prefix(
                 caal_llm.provider_instance,
@@ -971,24 +1044,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 history=conversation_window.messages,
             )
         logger.info("Session prefix warm-up %s", "complete" if warmed else "skipped")
-        try:
-            conversation_store.append_message(
-                conversation_id,
-                role="tool",
-                content=(
-                    "Session cache ready"
-                    if warmed
-                    else "Session cache warm-up did not complete"
-                ),
-                message_id=f"session_cache_{uuid.uuid4().hex}",
-                metadata={
-                    "kind": "session_cache",
-                    "status": "complete" if warmed else "failed",
-                },
-            )
-            await _publish_conversation_updated()
-        except Exception as error:
-            logger.warning("Could not record session-cache status: %s", error)
+        session_cache_state = "ready" if warmed else "failed"
+        await _publish_session_cache_state()
 
     # The canned greeting masks most prefill latency. If the user barges in,
     # VoiceAssistant.llm_node awaits this same task before starting real work.
@@ -1245,6 +1302,10 @@ def preload_models():
     elif llm_provider == "openai_compatible":
         runtime = get_runtime_settings()
 
+        # Closing the MCP servers below cancels this task's scope, so the warm
+        # result has to survive outside the coroutine's return value.
+        warm_result: dict[str, bool] = {}
+
         async def _warm_openai_service_prefix() -> bool:
             preload_llm = CAALLLM.from_settings(runtime)
             preload_memory = ShortTermMemory()
@@ -1259,11 +1320,12 @@ def preload_models():
                 tools = await discover_tools(
                     tool_context, preload_llm.provider_instance
                 )
-                return await warm_prompt_prefix(
+                warm_result["warmed"] = await warm_prompt_prefix(
                     preload_llm.provider_instance,
                     stable_prompt=load_prompt(runtime.get("language", "en")),
                     tools=tools,
                 )
+                return warm_result["warmed"]
             finally:
                 await asyncio.gather(
                     *(
@@ -1277,7 +1339,16 @@ def preload_models():
             logger.info(
                 "  Warming OpenAI-compatible model/runtime and exact tool prefix"
             )
-            warmed = asyncio.run(_warm_openai_service_prefix())
+            try:
+                asyncio.run(_warm_openai_service_prefix())
+            except asyncio.CancelledError:
+                # MCPServer.aclose() shuts down the anyio task group it was
+                # opened in, which cancels this task's scope on the way out.
+                # That CancelledError is a BaseException, so left uncaught it
+                # escapes preload and kills the worker before it ever starts.
+                # The warm-up itself is already finished by then.
+                logger.debug("MCP shutdown cancelled the warm-up scope")
+            warmed = warm_result.get("warmed", False)
             if warmed:
                 logger.info(
                     "  ✓ LLM model, runtime, kernels, and stable prompt ready"

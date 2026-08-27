@@ -12,7 +12,9 @@ import {
   TrashIcon,
   XIcon,
 } from '@phosphor-icons/react/dist/ssr';
+import { DESKTOP_CONTROL_PROTOCOL_VERSION } from '@/lib/mobile-control-store';
 import type { DesktopControlAction, MobileControlSnapshot } from '@/lib/mobile-control-store';
+import { findSupersededLiveIds } from '@/lib/transcript-finalization';
 
 interface ConversationSummary {
   id: string;
@@ -58,9 +60,11 @@ export function MobileTranscript() {
   const [titleDraft, setTitleDraft] = useState('');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [mediaBusy, setMediaBusy] = useState(false);
+  const [deletedLiveIds, setDeletedLiveIds] = useState<ReadonlySet<string>>(new Set());
   const [clock, setClock] = useState(() => Date.now());
   const transcriptRef = useRef<HTMLDivElement>(null);
   const loadedConversationRef = useRef<string | null>(null);
+  const shouldFollowLatestRef = useRef(true);
   const completedControlRef = useRef<string | null>(null);
 
   const refreshConversations = useCallback(async () => {
@@ -119,6 +123,7 @@ export function MobileTranscript() {
   useEffect(() => {
     setEditingTitle(false);
     setConfirmingDelete(false);
+    setDeletedLiveIds(new Set());
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -132,9 +137,46 @@ export function MobileTranscript() {
     );
   }, [activeConversationId, loadConversation, refreshConversations]);
 
+  // The desktop publishes this only after its canonical persisted history has
+  // refreshed. Reloading on that signal avoids racing the agent's database
+  // append (a fixed delay can fetch too early and then never retry).
+  const persistedTranscriptRevision = snapshot?.desktop.persistedTranscriptRevision ?? null;
+  useEffect(() => {
+    if (!activeConversationId || !persistedTranscriptRevision) return;
+    void loadConversation(activeConversationId).catch(() => undefined);
+  }, [activeConversationId, persistedTranscriptRevision, loadConversation]);
+
+  const liveMessages = useMemo(
+    () => snapshot?.desktop.liveMessages ?? [],
+    [snapshot?.desktop.liveMessages]
+  );
+  const supersededLiveIds = useMemo(
+    () =>
+      findSupersededLiveIds(
+        history.map((message) => ({
+          role: message.role,
+          createdAtMs: message.created_at * 1000,
+        })),
+        liveMessages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          partial: message.partial,
+          createdAtMs: message.createdAt,
+        }))
+      ),
+    [history, liveMessages]
+  );
+  const suppressedLiveIds = useMemo(
+    () => new Set([...supersededLiveIds, ...deletedLiveIds]),
+    [deletedLiveIds, supersededLiveIds]
+  );
+
   const messages = useMemo<DisplayMessage[]>(() => {
     const byId = new Map<string, DisplayMessage>();
     for (const item of history) {
+      // Cache readiness is session status now, not a transcript row; older
+      // conversations still hold rows from when it was one.
+      if (item.metadata.kind === 'session_cache') continue;
       const persistedToolParams = item.metadata.tool_params;
       byId.set(item.id, {
         id: item.id,
@@ -154,7 +196,11 @@ export function MobileTranscript() {
             : undefined,
       });
     }
-    for (const item of snapshot?.desktop.liveMessages ?? []) {
+    for (const item of liveMessages) {
+      // Keep a final LiveKit turn visible until the persisted-history revision
+      // arrives; otherwise it can disappear briefly between those two events.
+      if (suppressedLiveIds.has(item.id)) continue;
+      if (item.role === 'tool' && item.toolStatus !== 'running' && byId.has(item.id)) continue;
       byId.set(item.id, {
         id: item.id,
         role: item.role,
@@ -166,20 +212,49 @@ export function MobileTranscript() {
       });
     }
     return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
-  }, [history, snapshot?.desktop.liveMessages]);
+  }, [history, liveMessages, suppressedLiveIds]);
+
+  // Only a saved turn can be deleted; a live row has no id the store knows.
+  const savedDeletableIds = useMemo(
+    () => new Set(history.filter((item) => item.role !== 'tool').map((item) => item.id)),
+    [history]
+  );
+
+  // Follow the latest turn only while you are already reading at the bottom.
+  // Snapshots arrive on the desktop's heartbeat, so scrolling on every update
+  // would drag you back down the moment you scrolled up to read.
+  const handleTranscriptScroll = useCallback(() => {
+    const element = transcriptRef.current;
+    if (!element) return;
+    const distanceFromBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
+    shouldFollowLatestRef.current = distanceFromBottom <= 80;
+  }, []);
+
+  // Keyed by what is actually on screen: a heartbeat that changes nothing must
+  // not count as new content.
+  const transcriptSignature = `${messages.length}:${messages.at(-1)?.id ?? ''}:${
+    messages.at(-1)?.content.length ?? 0
+  }`;
 
   useEffect(() => {
+    if (!shouldFollowLatestRef.current) return;
     const frame = requestAnimationFrame(() => {
       const element = transcriptRef.current;
       if (element) element.scrollTop = element.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages]);
+  }, [transcriptSignature]);
+
+  // A different conversation starts at its latest turn again.
+  useEffect(() => {
+    shouldFollowLatestRef.current = true;
+  }, [activeConversationId]);
 
   const desktopOnline = Boolean(
     snapshot?.desktop.updatedAt && clock - snapshot.desktop.updatedAt < OFFLINE_AFTER_MS
   );
-  const desktopControllerReady = desktopOnline && snapshot?.desktop.controlProtocolVersion === 2;
+  const desktopControllerReady =
+    desktopOnline && snapshot?.desktop.controlProtocolVersion === DESKTOP_CONTROL_PROTOCOL_VERSION;
   const desktopConnected = desktopOnline && Boolean(snapshot?.desktop.connected);
   const pendingConversationId = snapshot?.pendingConversationId ?? null;
   const pendingControlCommand = snapshot?.pendingControlCommand ?? null;
@@ -213,6 +288,7 @@ export function MobileTranscript() {
       microphoneEnabled?: boolean;
       conversationId?: string;
       conversationTitle?: string;
+      messageId?: string;
     } = {}
   ) => {
     try {
@@ -255,6 +331,25 @@ export function MobileTranscript() {
     }
   };
 
+  // Deleting runs on the Mac so the desktop applies the same erase to its live
+  // context and reloads the transcript both screens read from.
+  const deleteMessage = async (messageId: string) => {
+    if (!activeConversationId) return;
+    const previous = history;
+    setDeletedLiveIds((current) => new Set([...current, ...supersededLiveIds]));
+    setHistory((current) => current.filter((item) => item.id !== messageId));
+    if (
+      !(await sendControl('delete_message', {
+        conversationId: activeConversationId,
+        messageId,
+      }))
+    ) {
+      setHistory(previous);
+      return;
+    }
+    await loadConversation(activeConversationId).catch(() => setHistory(previous));
+  };
+
   const toggleSystemMedia = async () => {
     setMediaBusy(true);
     try {
@@ -290,6 +385,19 @@ export function MobileTranscript() {
                 ? 'Deleting session'
                 : null;
 
+  // Same rule the desktop header uses: until the first thing you say, the agent
+  // state only reflects the canned greeting, so report the warm-up instead.
+  const sessionCache = snapshot?.desktop.sessionCache ?? null;
+  const hasUserSpoken = (snapshot?.desktop.liveMessages ?? []).some((item) => item.role === 'user');
+  const cacheLabel =
+    !hasUserSpoken && sessionCache
+      ? sessionCache === 'loading'
+        ? 'Session cache loading'
+        : sessionCache === 'ready'
+          ? 'Ready'
+          : 'Session cache unavailable'
+      : null;
+
   const statusLabel = !desktopOnline
     ? 'Desktop offline'
     : !desktopControllerReady
@@ -299,7 +407,7 @@ export function MobileTranscript() {
         : pendingControlLabel
           ? pendingControlLabel
           : desktopConnected
-            ? snapshot?.desktop.status || 'Connected'
+            ? (cacheLabel ?? snapshot?.desktop.status ?? 'Connected')
             : 'Desktop disconnected';
   const visibleError = error ?? snapshot?.desktop.controlCommandError ?? null;
   const activeTitle =
@@ -308,7 +416,7 @@ export function MobileTranscript() {
     'No active conversation';
 
   return (
-    <main className="bg-background text-foreground flex h-dvh flex-col overflow-hidden">
+    <main className="bg-background text-foreground flex h-svh flex-col overflow-hidden">
       <header className="border-border/70 bg-background/95 border-b px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-4 backdrop-blur">
         <div className="mx-auto max-w-2xl">
           <div className="flex items-center justify-between gap-4">
@@ -452,7 +560,11 @@ export function MobileTranscript() {
         </div>
       </header>
 
-      <div ref={transcriptRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
+      <div
+        ref={transcriptRef}
+        onScroll={handleTranscriptScroll}
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-5"
+      >
         <div className="mx-auto max-w-2xl space-y-4 pb-6">
           {messages.length === 0 ? (
             <div className="text-muted-foreground grid min-h-[45vh] place-content-center text-center">
@@ -474,7 +586,7 @@ export function MobileTranscript() {
                     : message.role === 'tool'
                       ? 'border-border/60 bg-muted/20 mx-3'
                       : 'border-border/60 bg-muted/40 mr-5'
-                } ${message.partial ? 'border-dashed opacity-65' : ''}`}
+                } ${message.partial ? 'border-dashed' : ''}`}
               >
                 <div className="text-muted-foreground mb-1.5 flex items-center justify-between gap-3 font-mono text-[10px] tracking-wider uppercase">
                   <span>
@@ -483,14 +595,26 @@ export function MobileTranscript() {
                       : message.role === 'tool'
                         ? `Tool · ${message.toolStatus ?? 'complete'}`
                         : 'CAAL'}
-                    {message.partial ? ' · listening' : ''}
                   </span>
-                  <time>
-                    {new Intl.DateTimeFormat(undefined, {
-                      hour: 'numeric',
-                      minute: '2-digit',
-                    }).format(message.createdAt)}
-                  </time>
+                  <span className="flex items-center gap-2">
+                    <time>
+                      {new Intl.DateTimeFormat(undefined, {
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      }).format(message.createdAt)}
+                    </time>
+                    {savedDeletableIds.has(message.id) && (
+                      <button
+                        type="button"
+                        disabled={!desktopControllerReady || controlsBusy}
+                        aria-label="Delete this message from history"
+                        onClick={() => void deleteMessage(message.id)}
+                        className="text-muted-foreground -my-1 rounded p-1 hover:text-red-300 disabled:opacity-35"
+                      >
+                        <TrashIcon className="size-3.5" />
+                      </button>
+                    )}
+                  </span>
                 </div>
                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap">{message.content}</p>
                 {message.role === 'tool' && message.toolParams?.length ? (

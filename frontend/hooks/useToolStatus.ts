@@ -69,7 +69,15 @@ export function useToolActivities() {
 
   useEffect(() => {
     if (!room) return;
-    const handleDisconnected = () => setActivities([]);
+    // Hanging up only starts the history reload that replaces these rows with
+    // their saved copies, so clearing here blanks a just-finished tool line out
+    // until that request returns. Keep the finished ones — the transcript drops
+    // each one as its saved copy arrives — and discard anything still running,
+    // which can never finish now and would otherwise spin forever.
+    const handleDisconnected = () =>
+      setActivities((current) => current.filter((item) => item.status !== 'running'));
+    // A new call starts from an empty list instead.
+    const handleConnected = () => setActivities([]);
     const handleDataReceived = (
       payload: Uint8Array,
       _participant: unknown,
@@ -101,9 +109,11 @@ export function useToolActivities() {
     };
     room.on(RoomEvent.DataReceived, handleDataReceived);
     room.on(RoomEvent.Disconnected, handleDisconnected);
+    room.on(RoomEvent.Connected, handleConnected);
     return () => {
       room.off(RoomEvent.DataReceived, handleDataReceived);
       room.off(RoomEvent.Disconnected, handleDisconnected);
+      room.off(RoomEvent.Connected, handleConnected);
     };
   }, [room]);
 

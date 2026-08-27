@@ -9,6 +9,7 @@ import {
   useTranscriptions,
   useVoiceAssistant,
 } from '@livekit/components-react';
+import type { ReceivedMessage } from '@livekit/components-react';
 import {
   ArrowDownIcon,
   BrainIcon,
@@ -29,12 +30,14 @@ import { Button } from '@/components/livekit/button';
 import { ScrollArea } from '@/components/livekit/scroll-area/scroll-area';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useConversations } from '@/hooks/useConversations';
+import { useSessionCache } from '@/hooks/useSessionCache';
 import { useToolActivities } from '@/hooks/useToolStatus';
 import {
   MICROPHONE_PREFERENCE_CHANGED_EVENT,
   getMicrophoneEnabledPreference,
   saveMicrophoneEnabledPreference,
 } from '@/lib/microphone-preference';
+import { findSupersededLiveIds } from '@/lib/transcript-finalization';
 import { cn } from '@/lib/utils';
 
 interface FadeProps {
@@ -97,6 +100,7 @@ export const SessionView = ({
     activeId,
     conversations,
     messages: historyMessages,
+    deleteMessage,
     loading: conversationsLoading,
   } = useConversations();
   const toolActivities = useToolActivities();
@@ -107,14 +111,27 @@ export const SessionView = ({
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const shouldFollowLatestRef = useRef(true);
+  const [deletedLiveIds, setDeletedLiveIds] = useState<ReadonlySet<string>>(new Set());
+  const liveMessageCacheRef = useRef(
+    new Map<string, { message: ReceivedMessage; partial: boolean }>()
+  );
+  const liveCacheConversationRef = useRef<string | null>(null);
+  const wasConnectedRef = useRef(session.isConnected);
+
+  // Tombstones outlive the hangup for the same reason the live rows do: they
+  // are what stops a deleted turn reappearing while history reloads. A fresh
+  // call starts clean.
+  useEffect(() => {
+    if (session.isConnected) setDeletedLiveIds(new Set());
+  }, [activeId, session.isConnected]);
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId);
-  const visibleMessages = session.isConnected ? messages : [];
-  const visibleToolActivities = session.isConnected ? toolActivities : [];
-  const timelineRows =
-    historyMessages.length + visibleMessages.length + visibleToolActivities.length;
+  const visibleMessages = messages;
+  // Kept past the hangup for the same reason the messages are: the hook now
+  // retires running rows itself, and the transcript drops each finished one as
+  // its saved copy arrives.
+  const visibleToolActivities = toolActivities;
   const latestMessageText = visibleMessages.at(-1)?.message ?? '';
-  const hasConversationContent = timelineRows > 0;
 
   const partialIds = useMemo(
     () =>
@@ -123,13 +140,78 @@ export const SessionView = ({
           .filter(
             (item) =>
               session.isConnected &&
-              item.participantInfo.identity === session.room.localParticipant.identity &&
               item.streamInfo.attributes?.['lk.transcription_final'] !== 'true'
           )
           .map((item) => item.streamInfo.id)
       ),
-    [session.isConnected, session.room.localParticipant.identity, transcriptions]
+    [session.isConnected, transcriptions]
   );
+  // LiveKit removes finalized transcription streams before the conversation
+  // database refresh reaches the browser. Retain each stream locally until a
+  // durable row (or a deletion tombstone) proves it can be removed.
+  const justConnected = session.isConnected && !wasConnectedRef.current;
+  wasConnectedRef.current = session.isConnected;
+  // Cleared when the conversation changes or a new call starts, not when one
+  // ends. Hanging up triggers a history refresh, and dropping the live rows the
+  // moment the socket closes blanked the final turn out until that HTTP round
+  // trip returned. Suppression below retires each row on its own evidence.
+  if (liveCacheConversationRef.current !== activeId || justConnected) {
+    liveMessageCacheRef.current.clear();
+    liveCacheConversationRef.current = activeId;
+  }
+  for (const message of visibleMessages) {
+    liveMessageCacheRef.current.set(message.id, {
+      message,
+      partial: partialIds.has(message.id),
+    });
+  }
+  // An utterance still mid-transcription when the call drops never finalizes
+  // and never persists, so nothing downstream would ever retire it. Only
+  // finalized rows are worth holding past the hangup.
+  if (!session.isConnected) {
+    for (const [id, entry] of liveMessageCacheRef.current) {
+      if (entry.partial) liveMessageCacheRef.current.delete(id);
+    }
+  }
+  const cachedLiveMessages = [...liveMessageCacheRef.current.values()];
+  const cachedPartialIds = new Set(
+    cachedLiveMessages.filter((item) => item.partial).map((item) => item.message.id)
+  );
+  const reconciledMessages = cachedLiveMessages.map((item) => item.message);
+  const supersededLiveIds = findSupersededLiveIds(
+    historyMessages.map((message) => ({
+      role: message.role,
+      createdAtMs: message.created_at * 1000,
+    })),
+    cachedLiveMessages.map(({ message, partial }) => ({
+      id: message.id,
+      role: message.from?.isLocal ? 'user' : 'assistant',
+      partial,
+      createdAtMs: message.timestamp,
+    }))
+  );
+  for (const id of new Set([...supersededLiveIds, ...deletedLiveIds])) {
+    liveMessageCacheRef.current.delete(id);
+  }
+  const suppressedLiveIds = useMemo(
+    () => new Set([...supersededLiveIds, ...deletedLiveIds]),
+    [deletedLiveIds, supersededLiveIds]
+  );
+  const handleDeleteMessage = useCallback(
+    (messageId: string) => {
+      // Once the durable row disappears it can no longer suppress LiveKit's
+      // stale partial. Preserve every currently established completion as a
+      // call-local tombstone before applying the optimistic delete.
+      setDeletedLiveIds((current) => new Set([...current, ...supersededLiveIds]));
+      void deleteMessage(messageId);
+    },
+    [deleteMessage, supersededLiveIds]
+  );
+  const timelineRows =
+    historyMessages.length +
+    reconciledMessages.filter((message) => !suppressedLiveIds.has(message.id)).length +
+    visibleToolActivities.length;
+  const hasConversationContent = timelineRows > 0;
   const preCallMicrophoneTrackRef = useMemo(
     () => ({
       participant: session.room.localParticipant,
@@ -182,6 +264,10 @@ export const SessionView = ({
       window.removeEventListener(MICROPHONE_PREFERENCE_CHANGED_EVENT, syncMicrophonePreference);
   }, []);
 
+  // Jump to the bottom when you open a conversation, and only then. Following
+  // the newest turn afterwards is the next effect's job, and it follows only
+  // while you are already reading at the bottom. Firing this on every saved
+  // turn as well used to drag you back down mid-call each time one persisted.
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const area = scrollAreaRef.current;
@@ -190,7 +276,7 @@ export const SessionView = ({
       setShowJumpToLatest(false);
     });
     return () => cancelAnimationFrame(frame);
-  }, [activeId, historyMessages.length]);
+  }, [activeId]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -206,17 +292,32 @@ export const SessionView = ({
     return () => cancelAnimationFrame(frame);
   }, [latestMessageText, timelineRows, updateScrollPosition]);
 
+  // Until the first thing you say, the agent state only reflects the canned
+  // greeting playing out, which says nothing useful. Report the prompt-cache
+  // warm-up instead, since that is what the session is actually waiting on.
+  const sessionCache = useSessionCache();
+  const hasUserSpoken = visibleMessages.some((message) => message.from?.isLocal);
+  const cacheLabel =
+    session.isConnected && !hasUserSpoken && sessionCache
+      ? sessionCache === 'loading'
+        ? 'Session cache loading'
+        : sessionCache === 'ready'
+          ? 'Ready'
+          : 'Session cache unavailable'
+      : null;
+
   const statusLabel = !session.isConnected
     ? 'Disconnected'
-    : agentState === 'listening'
-      ? 'Listening'
-      : agentState === 'thinking'
-        ? 'Thinking'
-        : agentState === 'speaking'
-          ? 'Speaking'
-          : agentState === 'connecting' || agentState === 'initializing'
-            ? 'Connecting'
-            : 'Connected';
+    : (cacheLabel ??
+      (agentState === 'listening'
+        ? 'Listening'
+        : agentState === 'thinking'
+          ? 'Thinking'
+          : agentState === 'speaking'
+            ? 'Speaking'
+            : agentState === 'connecting' || agentState === 'initializing'
+              ? 'Connecting'
+              : 'Connected'));
 
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
@@ -290,10 +391,12 @@ export const SessionView = ({
         >
           <ChatTranscript
             hidden={!chatOpen}
-            messages={visibleMessages}
+            messages={reconciledMessages}
             historyMessages={historyMessages}
-            partialIds={partialIds}
+            partialIds={cachedPartialIds}
+            suppressedLiveIds={suppressedLiveIds}
             toolActivities={visibleToolActivities}
+            onDeleteMessage={handleDeleteMessage}
             className="mx-auto max-w-2xl space-y-3 transition-opacity duration-300 ease-out"
           />
         </ScrollArea>

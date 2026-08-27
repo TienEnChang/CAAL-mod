@@ -39,6 +39,7 @@ interface ConversationContextValue {
   selectConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<boolean>;
   deleteConversation: (id: string) => Promise<boolean>;
+  deleteMessage: (messageId: string) => Promise<boolean>;
   refresh: () => Promise<void>;
 }
 
@@ -107,17 +108,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     ) => {
       if (topic !== 'conversation_updated') return;
       if (refreshTimer) clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => void refreshListing(), 150);
+      // Reload the saved turns too, not just the listing: mid-call the stored
+      // rows are the only ones carrying an id a delete can act on.
+      refreshTimer = setTimeout(() => void refresh(), 150);
     };
     room.on(RoomEvent.DataReceived, handleData);
     return () => {
       if (refreshTimer) clearTimeout(refreshTimer);
       room.off(RoomEvent.DataReceived, handleData);
     };
-  }, [refreshListing, session.room]);
+  }, [refresh, session.room]);
 
+  // Both directions: joining a call has to pick up whatever the agent wrote
+  // before this client was in the room to hear about it.
   useEffect(() => {
-    if (!session.isConnected && !loading) void refresh();
+    if (!loading) void refresh();
   }, [session.isConnected, loading, refresh]);
 
   const reconnectAround = useCallback(
@@ -276,6 +281,32 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     [reconnectAround]
   );
 
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!activeId) return false;
+      setError(null);
+      // Drop it locally first so the erased turn cannot be read back as still
+      // present while the agent applies the same delete to its live context.
+      const previous = messages;
+      setMessages((current) => current.filter((message) => message.id !== messageId));
+      try {
+        await responseJson(
+          await fetch(
+            `/api/conversations/${encodeURIComponent(activeId)}/messages/${encodeURIComponent(messageId)}`,
+            { method: 'DELETE' }
+          )
+        );
+        await refresh();
+        return true;
+      } catch (requestError) {
+        setMessages(previous);
+        setError(requestError instanceof Error ? requestError.message : 'Unable to delete message');
+        return false;
+      }
+    },
+    [activeId, messages, refresh]
+  );
+
   const renameConversation = useCallback(async (id: string, title: string) => {
     const cleanedTitle = title.trim();
     if (!cleanedTitle) return false;
@@ -314,6 +345,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       selectConversation,
       renameConversation,
       deleteConversation,
+      deleteMessage,
       refresh,
     }),
     [
@@ -326,6 +358,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       selectConversation,
       renameConversation,
       deleteConversation,
+      deleteMessage,
       refresh,
     ]
   );

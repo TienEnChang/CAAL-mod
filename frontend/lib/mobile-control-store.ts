@@ -1,3 +1,12 @@
+/**
+ * Shape version of the desktop→mobile snapshot.
+ *
+ * Bump whenever mobile starts relying on a new field. A desktop tab left open
+ * across a deploy keeps publishing the old shape, and mobile shows "Refresh
+ * desktop UI" rather than quietly rendering from fields that are not there.
+ */
+export const DESKTOP_CONTROL_PROTOCOL_VERSION = 4;
+
 export interface MirroredTranscriptMessage {
   id: string;
   content: string;
@@ -16,9 +25,11 @@ export interface DesktopControlState {
   activeConversationId: string | null;
   activeConversationTitle: string | null;
   status: string;
+  sessionCache: 'loading' | 'ready' | 'failed' | null;
   microphoneEnabled: boolean;
   completedControlCommandId: string | null;
   controlCommandError: string | null;
+  persistedTranscriptRevision: string | null;
   liveMessages: MirroredTranscriptMessage[];
   updatedAt: number;
 }
@@ -43,7 +54,8 @@ export type DesktopControlAction =
   | 'set_microphone_enabled'
   | 'create_conversation'
   | 'rename_conversation'
-  | 'delete_conversation';
+  | 'delete_conversation'
+  | 'delete_message';
 
 export interface DesktopControlCommand {
   commandId: string;
@@ -51,6 +63,7 @@ export interface DesktopControlCommand {
   microphoneEnabled?: boolean;
   conversationId?: string;
   conversationTitle?: string;
+  messageId?: string;
   createdAt: number;
 }
 
@@ -58,22 +71,26 @@ type Listener = (event: string, data: unknown) => void;
 
 class MobileControlStore {
   private desktop: DesktopControlState = {
-    controlProtocolVersion: 2,
+    controlProtocolVersion: DESKTOP_CONTROL_PROTOCOL_VERSION,
     clientId: null,
     connected: false,
     agentReady: false,
     activeConversationId: null,
     activeConversationTitle: null,
     status: 'offline',
+    sessionCache: null,
     microphoneEnabled: false,
     completedControlCommandId: null,
     controlCommandError: null,
+    persistedTranscriptRevision: null,
     liveMessages: [],
     updatedAt: 0,
   };
 
   private pendingConversationId: string | null = null;
   private pendingCommandId: string | null = null;
+  // Whether the pending switch has to wait for an agent session to come back.
+  private pendingNeedsAgent = false;
   private pendingControlCommand: DesktopControlCommand | null = null;
   private listeners = new Set<Listener>();
 
@@ -89,17 +106,24 @@ class MobileControlStore {
   updateDesktop(state: DesktopControlState): MobileControlSnapshot {
     this.desktop = {
       ...state,
+      // An older desktop client omits fields entirely; keep the shape stable.
+      sessionCache: state.sessionCache ?? null,
+      persistedTranscriptRevision: state.persistedTranscriptRevision ?? null,
       liveMessages: state.liveMessages.slice(-50),
       updatedAt: Date.now(),
     };
 
+    // A switch made during a call is finished once the replacement agent is up.
+    // With no call running there is nothing to come up, and waiting on
+    // agentReady — which requires a live session — would hang forever.
     if (
       this.pendingConversationId &&
-      state.agentReady &&
-      state.activeConversationId === this.pendingConversationId
+      state.activeConversationId === this.pendingConversationId &&
+      (state.agentReady || !this.pendingNeedsAgent)
     ) {
       this.pendingConversationId = null;
       this.pendingCommandId = null;
+      this.pendingNeedsAgent = false;
     }
 
     if (
@@ -126,6 +150,7 @@ class MobileControlStore {
     };
     this.pendingConversationId = conversationId;
     this.pendingCommandId = command.commandId;
+    this.pendingNeedsAgent = this.desktop.connected;
     this.publish('select_conversation', command);
     this.publish('snapshot', this.snapshot());
     return command;
@@ -135,7 +160,8 @@ class MobileControlStore {
     action: DesktopControlAction,
     microphoneEnabled?: boolean,
     conversationId?: string,
-    conversationTitle?: string
+    conversationTitle?: string,
+    messageId?: string
   ): DesktopControlCommand {
     if (this.pendingControlCommand) {
       throw new Error('Another desktop control is still in progress');
@@ -145,6 +171,9 @@ class MobileControlStore {
     }
     if ((action === 'rename_conversation' || action === 'delete_conversation') && !conversationId) {
       throw new Error('conversationId is required for this control');
+    }
+    if (action === 'delete_message' && !messageId) {
+      throw new Error('messageId is required to delete a message');
     }
     const cleanedTitle = conversationTitle?.trim();
     if (action === 'rename_conversation' && !cleanedTitle) {
@@ -157,6 +186,7 @@ class MobileControlStore {
       microphoneEnabled,
       conversationId,
       conversationTitle: cleanedTitle,
+      messageId,
       createdAt: Date.now(),
     };
     this.pendingControlCommand = command;

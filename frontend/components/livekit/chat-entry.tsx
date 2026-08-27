@@ -14,6 +14,8 @@ export interface ChatEntryProps extends React.HTMLAttributes<HTMLLIElement> {
   name?: string;
   /** Whether the message has been edited. */
   hasBeenEdited?: boolean;
+  /** Control shown beside the timestamp, which already tracks the row's side. */
+  action?: React.ReactNode;
 }
 
 export const ChatEntry = ({
@@ -23,6 +25,7 @@ export const ChatEntry = ({
   message,
   messageOrigin,
   hasBeenEdited = false,
+  action,
   className,
   ...props
 }: ChatEntryProps) => {
@@ -39,7 +42,7 @@ export const ChatEntry = ({
       <header
         className={cn(
           'text-muted-foreground flex items-center gap-2 text-sm',
-          messageOrigin === 'local' ? 'flex-row-reverse' : 'text-left'
+          messageOrigin === 'local' ? 'justify-end' : 'justify-start'
         )}
       >
         {name && <strong>{name}</strong>}
@@ -47,11 +50,15 @@ export const ChatEntry = ({
           {hasBeenEdited && '*'}
           {time.toLocaleTimeString(locale, { timeStyle: 'short' })}
         </span>
+        {action}
       </header>
       <span
         className={cn(
-          'max-w-4/5 rounded-[20px]',
-          messageOrigin === 'local' ? 'bg-muted ml-auto p-2' : 'mr-auto'
+          // Keep the box geometry identical while a LiveKit row is replaced by
+          // its durable history row. A transparent border prevents the text
+          // from shifting when the live dashed border disappears.
+          'max-w-4/5 rounded-[20px] border border-transparent p-2',
+          messageOrigin === 'local' ? 'bg-muted ml-auto' : 'mr-auto'
         )}
       >
         {message}

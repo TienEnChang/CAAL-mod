@@ -46,7 +46,14 @@ def test_prefix_warmup_uses_exact_tools_and_bounded_generation(monkeypatch):
             stable_prompt="STABLE",
             tools=tools,
             session_context="SESSION",
-            history=[{"role": "assistant", "content": "RECENT"}],
+            history=[
+                {
+                    "id": "saved-id",
+                    "role": "assistant",
+                    "content": "RECENT",
+                    "created_at": 10,
+                }
+            ],
         )
     )
 
@@ -54,7 +61,7 @@ def test_prefix_warmup_uses_exact_tools_and_bounded_generation(monkeypatch):
     call = provider.calls[0]
     assert call["tools"] is tools
     assert call["messages"][0]["content"] == "STABLE\n\nSESSION"
-    assert call["messages"][1]["content"] == "RECENT"
+    assert call["messages"][1] == {"role": "assistant", "content": "RECENT"}
     assert call["kwargs"]["max_tokens"] == 1
     assert call["kwargs"]["temperature"] == 0
 
