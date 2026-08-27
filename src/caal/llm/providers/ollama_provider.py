@@ -119,6 +119,9 @@ class OllamaProvider(LLMProvider):
         """
         think = kwargs.get("think", self._think)
         options = self._get_options()
+        options["temperature"] = kwargs.get("temperature", self._temperature)
+        if kwargs.get("max_tokens") is not None:
+            options["num_predict"] = int(kwargs["max_tokens"])
 
         # Run sync client.chat in thread pool
         response = await asyncio.to_thread(
@@ -181,6 +184,9 @@ class OllamaProvider(LLMProvider):
         """
         think = kwargs.get("think", self._think)
         options = self._get_options()
+        options["temperature"] = kwargs.get("temperature", self._temperature)
+        if kwargs.get("max_tokens") is not None:
+            options["num_predict"] = int(kwargs["max_tokens"])
 
         # Run sync client.chat with streaming in thread pool
         # We need to iterate in a thread since client.chat returns a sync iterator

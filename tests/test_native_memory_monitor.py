@@ -21,18 +21,6 @@ def test_parse_swapusage() -> None:
     assert result["swap_used_bytes"] == int(9822.12 * 1024**2)
 
 
-def test_parse_latest_prompt_cache() -> None:
-    text = """
-Prompt Cache: 2 sequences, 0.75 GB
-Prompt Cache: 10 sequences, 3.99 GB
-"""
-
-    assert monitor.parse_prompt_cache(text) == {
-        "sequences": 10,
-        "bytes": int(3.99 * 1024**3),
-    }
-
-
 def test_parse_footprint_attributes_gpu_and_swap() -> None:
     payload = {
         "processes": [
@@ -48,7 +36,7 @@ def test_parse_footprint_attributes_gpu_and_swap() -> None:
         ]
     }
 
-    result = monitor.parse_footprint(payload, {42: "qwen"})["qwen"]
+    result = monitor.parse_footprint(payload, {42: "model"})["model"]
 
     assert result == {
         "physical_bytes": 900,
@@ -62,3 +50,37 @@ def test_parse_footprint_attributes_gpu_and_swap() -> None:
 def test_bad_swapusage_is_rejected() -> None:
     with pytest.raises(monitor.MonitorError):
         monitor.parse_swapusage("unavailable")
+
+
+def test_executable_pids_ignore_matching_command_lines(monkeypatch) -> None:
+    """A process that merely mentions llmster is not part of the model lane."""
+    listing = "\n".join(
+        [
+            "    1 /sbin/launchd",
+            "25432 llmster",
+            "25438 /Users/me/.lmstudio/.internal/utils/node",
+            "59525 /bin/zsh",  # was matched by the previous command-line search
+            "60001 llmsterctl",
+        ]
+    )
+    monkeypatch.setattr(monitor, "_run", lambda *args, **kwargs: listing)
+
+    assert monitor._executable_pids("llmster") == [25432]
+
+
+def test_llmster_children_join_the_model_lane(monkeypatch, tmp_path: Path) -> None:
+    pid_dir = tmp_path / ".native" / "pids"
+    pid_dir.mkdir(parents=True)
+    (pid_dir / "model.pid").write_text("46349")
+    processes = {
+        46349: {"ppid": 1, "rss_bytes": 20, "command": "python lmstudio_model_server.py"},
+        25432: {"ppid": 1, "rss_bytes": 300, "command": "llmster"},
+        46380: {"ppid": 25432, "rss_bytes": 4000, "command": "node -e ..."},
+        59525: {"ppid": 1, "rss_bytes": 7, "command": "zsh -c grep llmster"},
+    }
+    monkeypatch.setattr(monitor, "_executable_pids", lambda comm: [25432])
+
+    _, services = monitor._service_processes(tmp_path, processes)
+
+    assert services["model"]["pids"] == [25432, 46349, 46380]
+    assert services["model"]["rss_bytes"] == 4320

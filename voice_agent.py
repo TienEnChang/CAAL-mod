@@ -31,7 +31,6 @@ import random
 import sys
 import time
 import uuid
-from pathlib import Path
 
 import requests
 
@@ -50,12 +49,15 @@ from livekit.plugins import groq as groq_plugin  # noqa: E402
 from livekit.plugins import openai, silero  # noqa: E402
 
 from caal import CAALLLM  # noqa: E402
+from caal.context import ToolContext  # noqa: E402
 from caal.conversation_summary import (  # noqa: E402
+    checkpoint_conversation_summary,
     recall_block,
-    refresh_conversation_summary,
 )
 from caal.conversations import ConversationStore  # noqa: E402
 from caal.integrations import (  # noqa: E402
+    MEMORY_SHORT_TOOL_DEF,
+    WEB_SEARCH_TOOL_DEF,
     MemoryTools,
     WebSearchTools,
     create_hass_tools,
@@ -65,7 +67,8 @@ from caal.integrations import (  # noqa: E402
     load_mcp_config,
     mcp_url_to_base_url,
 )
-from caal.llm import ToolDataCache, llm_node  # noqa: E402
+from caal.llm import ToolDataCache, discover_tools, llm_node  # noqa: E402
+from caal.lmstudio_model import reload_local_lmstudio_model  # noqa: E402
 from caal.memory import ShortTermMemory  # noqa: E402
 from caal.memory_guard import (  # noqa: E402
     MemoryGuardConfig,
@@ -73,8 +76,10 @@ from caal.memory_guard import (  # noqa: E402
     guard_loop,
     wait_for_recovery,
 )
-from caal.qwen_cache import clear_local_qwen_cache  # noqa: E402
-from caal.qwen_process import restart_local_qwen  # noqa: E402
+from caal.prompt_lifecycle import (  # noqa: E402
+    build_session_context,
+    warm_prompt_prefix,
+)
 from caal.speech_cache import clear_local_speech_cache  # noqa: E402
 from caal.stt import PreviewStreamAdapter, WakeWordGatedSTT  # noqa: E402
 from caal.tts.sync_openai_tts import SyncOpenAITTS  # noqa: E402
@@ -181,7 +186,8 @@ def get_runtime_settings() -> dict:
             settings.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
         ),
         "openai_model": (
-            user_settings.get("openai_model")
+            os.getenv("CAAL_LMSTUDIO_INSTANCE_ID")
+            or user_settings.get("openai_model")
             or os.getenv("OPENAI_MODEL", "")
         ),
         # OpenRouter settings
@@ -203,9 +209,8 @@ def get_runtime_settings() -> dict:
 
 
 def load_prompt(language: str = "en") -> str:
-    """Load and populate prompt template with date context."""
-    return settings_module.load_prompt_with_context(
-        timezone_id=TIMEZONE_ID,
+    """Load only the call-invariant system instructions."""
+    return settings_module.load_stable_prompt(
         timezone_display=TIMEZONE_DISPLAY,
         language=language,
     )
@@ -237,16 +242,21 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         hass_tool_callables: dict | None = None,
         short_term_memory: ShortTermMemory | None = None,
         chat_ctx: llm.ChatContext | None = None,
-        conversation_summary: str | None = None,
+        session_context: str | None = None,
+        inference_lock: asyncio.Lock | None = None,
     ) -> None:
+        stable_prompt = load_prompt(language=language)
         super().__init__(
-            instructions=load_prompt(language=language),
+            instructions=stable_prompt,
             llm=caal_llm,  # Satisfies LLM interface requirement
             chat_ctx=chat_ctx,
         )
 
         # Store provider for llm_node access
         self._provider = caal_llm.provider_instance
+        self._stable_prompt = stable_prompt
+        self._session_context = session_context
+        self._inference_lock = inference_lock or asyncio.Lock()
 
         # All MCP servers (for multi-MCP support)
         # Named _caal_mcp_servers to avoid conflict with LiveKit's internal _mcp_servers handling
@@ -260,6 +270,12 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         # Home Assistant tools (only if HASS is connected)
         self._hass_tool_definitions = hass_tool_definitions or []
         self._hass_tool_callables = hass_tool_callables or {}
+        # Use the same canonical schemas as non-LiveKit startup discovery. The
+        # discovery layer de-duplicates these over LiveKit's reflected schemas.
+        self._agent_tool_definitions = [
+            MEMORY_SHORT_TOOL_DEF,
+            WEB_SEARCH_TOOL_DEF,
+        ]
 
         # Callback for publishing tool status to frontend
         self._on_tool_status = on_tool_status
@@ -271,9 +287,10 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
         # Short-term memory for persistent context (MemoryTools mixin requirement)
         self._short_term_memory = short_term_memory
 
-        # Updated in the background as transcript turns leave the verbatim
-        # replay window. llm_node injects this into the system prompt.
-        self._conversation_recall = recall_block(conversation_summary)
+        # Compatibility hook for callers that have not yet adopted the frozen
+        # session-context block. Voice calls include recall in that block.
+        self._conversation_recall = ""
+        self._session_prefix_warm_task: asyncio.Task | None = None
 
         # Set to the trip reason when the memory guard ends this session. The
         # session is finished at that point, so no further turn may reach the
@@ -292,15 +309,26 @@ class VoiceAssistant(MemoryTools, WebSearchTools, Agent):
             )
             return
 
-        async for chunk in llm_node(
-            self,
-            chat_ctx,
-            provider=self._provider,
-            tool_data_cache=self._tool_data_cache,
-            short_term_memory=self._short_term_memory,
-            max_turns=self._max_turns,
+        # A barge-in may finish STT before greeting-time prefill completes.
+        # Reuse that request instead of starting a competing prediction; this
+        # holds active Qwen concurrency at one and preserves the prepared cache.
+        if (
+            self._session_prefix_warm_task
+            and not self._session_prefix_warm_task.done()
         ):
-            yield chunk
+            logger.info("First user turn waiting for session-prefix warm-up")
+            await self._session_prefix_warm_task
+
+        async with self._inference_lock:
+            async for chunk in llm_node(
+                self,
+                chat_ctx,
+                provider=self._provider,
+                tool_data_cache=self._tool_data_cache,
+                short_term_memory=self._short_term_memory,
+                max_turns=self._max_turns,
+            ):
+                yield chunk
 
 
 # =============================================================================
@@ -387,9 +415,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         os.environ["GROQ_API_KEY"] = runtime["groq_api_key"]
 
     memory_config = MemoryGuardConfig.from_env()
-    # MLX memory is only readable from a Qwen server on this machine; a remote
-    # OpenAI-compatible endpoint has no such signal and none is guessed.
-    qwen_base_url = (
+    lmstudio_base_url = (
         runtime["openai_base_url"]
         if runtime["llm_provider"] == "openai_compatible"
         else None
@@ -601,21 +627,15 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # underneath an in-flight response.
     conversation_store = ConversationStore()
     conversation_id = conversation_store.ensure_active()
-    conversation_window = conversation_store.context_window(conversation_id)
-    conversation_summary = None
-    if conversation_window.truncated:
-        try:
-            conversation_summary = await refresh_conversation_summary(
-                conversation_store,
-                conversation_id,
-                caal_llm.provider_instance,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to refresh conversation summary: {e}")
-            conversation_summary, _ = conversation_store.get_summary(conversation_id)
+    conversation_summary, summary_through_rowid = conversation_store.get_summary(
+        conversation_id
+    )
+    conversation_window = conversation_store.rehydration_window(conversation_id)
     logger.info(
-        "Rehydrating %s conversation messages (truncated=%s, recall=%s)",
+        "Rehydrating %s post-summary messages "
+        "(checkpoint=%s, truncated=%s, recall=%s)",
         len(conversation_window.messages),
+        summary_through_rowid,
         conversation_window.truncated,
         bool(conversation_summary),
     )
@@ -634,12 +654,18 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # ==========================================================================
 
     _transcription_time: float | None = None
+    inference_lock = asyncio.Lock()
+    session_prefix_warm_task: asyncio.Task | None = None
+    rolling_summary_task: asyncio.Task | None = None
 
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(ev) -> None:
-        nonlocal _transcription_time
+        nonlocal _transcription_time, rolling_summary_task
         if ev.is_final:
             _transcription_time = time.perf_counter()
+            if rolling_summary_task and not rolling_summary_task.done():
+                logger.info("Cancelling rolling summary for a live user turn")
+                rolling_summary_task.cancel()
             logger.debug(f"User said: {ev.transcript[:80]}...")
         else:
             logger.debug(f"User partial: {ev.transcript[:80]}...")
@@ -732,6 +758,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     else:
         logger.info("Short-term memory initialized (empty)")
 
+    session_context = build_session_context(
+        settings_module.load_session_date_context(
+            timezone_id=TIMEZONE_ID,
+            timezone_display=TIMEZONE_DISPLAY,
+            language=language,
+        ),
+        user_memory=short_term_memory.get_context_message(),
+        conversation_recall=recall_block(conversation_summary),
+    )
+
     # Create agent with CAALLLM and all MCP servers
     assistant = VoiceAssistant(
         caal_llm=caal_llm,
@@ -747,28 +783,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         hass_tool_callables=hass_tool_callables,
         short_term_memory=short_term_memory,
         chat_ctx=chat_ctx,
-        conversation_summary=(
-            conversation_summary if conversation_window.truncated else None
-        ),
+        session_context=session_context,
+        inference_lock=inference_lock,
     )
-
-    _summary_lock = asyncio.Lock()
-    _summary_tasks: set[asyncio.Task] = set()
-
-    async def _update_conversation_summary() -> None:
-        async with _summary_lock:
-            try:
-                summary = await refresh_conversation_summary(
-                    conversation_store,
-                    conversation_id,
-                    caal_llm.provider_instance,
-                )
-                window = conversation_store.context_window(conversation_id)
-                assistant._conversation_recall = (
-                    recall_block(summary) if window.truncated else ""
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update conversation summary: {e}")
+    call_tools = await discover_tools(assistant, caal_llm.provider_instance)
 
     async def _publish_conversation_updated() -> None:
         import json
@@ -782,8 +800,58 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         except Exception as e:
             logger.debug(f"Failed to publish conversation update: {e}")
 
+    rolling_summary_next_attempt = 0.0
+
+    async def _maybe_update_rolling_summary() -> None:
+        """Checkpoint a large active-call delta without competing with a turn."""
+        nonlocal rolling_summary_next_attempt
+        trigger_chars = int(
+            os.getenv("HISTORY_ROLLING_SUMMARY_TRIGGER_CHARS", "4000")
+        )
+        if trigger_chars <= 0:
+            return
+        _, pending_chars = await asyncio.to_thread(
+            conversation_store.unsummarized_stats, conversation_id
+        )
+        if pending_chars < trigger_chars:
+            return
+
+        now = time.monotonic()
+        if now < rolling_summary_next_attempt:
+            return
+        retry_seconds = float(
+            os.getenv("HISTORY_ROLLING_SUMMARY_RETRY_SECONDS", "120")
+        )
+        rolling_summary_next_attempt = now + max(0, retry_seconds)
+        timeout = float(os.getenv("HISTORY_SUMMARY_TIMEOUT_SECONDS", "30"))
+        if timeout <= 0:
+            return
+
+        logger.info(
+            "Rolling summary triggered with %s unsummarized characters",
+            pending_chars,
+        )
+        try:
+            async with inference_lock:
+                await asyncio.wait_for(
+                    checkpoint_conversation_summary(
+                        conversation_store,
+                        conversation_id,
+                        caal_llm.provider_instance,
+                    ),
+                    timeout=timeout,
+                )
+        except asyncio.CancelledError:
+            rolling_summary_next_attempt = 0.0
+            raise
+        except TimeoutError:
+            logger.warning("Rolling conversation summary timed out after %.1fs", timeout)
+        except Exception as error:
+            logger.warning("Rolling conversation summary failed: %s", error)
+
     @session.on("conversation_item_added")
     def on_conversation_item_added(ev) -> None:
+        nonlocal rolling_summary_task
         item = ev.item
         if not isinstance(item, llm.ChatMessage) or item.role not in {"user", "assistant"}:
             return
@@ -803,10 +871,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 metadata={"interrupted": item.interrupted},
             )
             asyncio.create_task(_publish_conversation_updated())
-            if item.role == "assistant":
-                task = asyncio.create_task(_update_conversation_summary())
-                _summary_tasks.add(task)
-                task.add_done_callback(_summary_tasks.discard)
+            if item.role == "assistant" and (
+                rolling_summary_task is None or rolling_summary_task.done()
+            ):
+                rolling_summary_task = asyncio.create_task(
+                    _maybe_update_rolling_summary()
+                )
         except Exception as e:
             logger.warning(f"Failed to persist conversation item: {e}")
 
@@ -824,6 +894,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     async def _handle_webhook_command(data: rtc.DataPacket) -> None:
         """Handle commands from webhook server via LiveKit data channel."""
+        nonlocal call_tools
         if data.topic != "webhook_command":
             return
 
@@ -847,7 +918,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
             elif action == "reload_tools":
                 # Clear agent's internal caches
-                assistant._ollama_tools_cache = None
+                assistant._llm_tools_cache = None
 
                 # Clear n8n module-level cache so fresh notes are fetched
                 from caal.integrations.n8n import clear_caches as clear_n8n_caches
@@ -872,6 +943,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 elif tool_name := cmd.get("tool_name"):
                     await session.say(f"A new tool called '{tool_name}' is now available.")
 
+                call_tools = await discover_tools(
+                    assistant, caal_llm.provider_instance
+                )
+
         except Exception as e:
             logger.error(f"Failed to process webhook command: {e}")
 
@@ -885,6 +960,40 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         room=ctx.room,
         agent=assistant,
     )
+
+    async def _warm_session_prefix() -> None:
+        async with inference_lock:
+            warmed = await warm_prompt_prefix(
+                caal_llm.provider_instance,
+                stable_prompt=assistant._stable_prompt,
+                tools=call_tools,
+                session_context=session_context,
+                history=conversation_window.messages,
+            )
+        logger.info("Session prefix warm-up %s", "complete" if warmed else "skipped")
+        try:
+            conversation_store.append_message(
+                conversation_id,
+                role="tool",
+                content=(
+                    "Session cache ready"
+                    if warmed
+                    else "Session cache warm-up did not complete"
+                ),
+                message_id=f"session_cache_{uuid.uuid4().hex}",
+                metadata={
+                    "kind": "session_cache",
+                    "status": "complete" if warmed else "failed",
+                },
+            )
+            await _publish_conversation_updated()
+        except Exception as error:
+            logger.warning("Could not record session-cache status: %s", error)
+
+    # The canned greeting masks most prefill latency. If the user barges in,
+    # VoiceAssistant.llm_node awaits this same task before starting real work.
+    session_prefix_warm_task = asyncio.create_task(_warm_session_prefix())
+    assistant._session_prefix_warm_task = session_prefix_warm_task
 
     # Say a canned greeting using agent name — avoids LLM call that could trigger tools
     agent_name = settings_module.get_setting("agent_name", "Cal")
@@ -904,16 +1013,21 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # the call and let the next one start fresh from rehydrated history.
 
     memory_trip: MemoryTrip | None = None
+    hard_reset_ready: bool | None = None
 
-    async def _restart_qwen(reason: str) -> bool:
-        if not qwen_base_url:
-            logger.warning("Cannot restart Qwen for memory trip: no local Qwen endpoint")
+    async def _reload_model(reason: str) -> bool:
+        if not lmstudio_base_url:
+            logger.warning("Cannot reload model for memory trip: no LM Studio endpoint")
             return False
-        logger.warning("Restarting Qwen for memory: %s", reason)
+        logger.warning("Reloading LM Studio model for memory: %s", reason)
         return await asyncio.to_thread(
-            restart_local_qwen,
-            Path(_script_dir),
-            qwen_base_url,
+            reload_local_lmstudio_model,
+            lmstudio_base_url,
+            runtime["openai_model"],
+            model_key=os.getenv("CAAL_LMSTUDIO_MODEL"),
+            lms_bin=os.getenv("CAAL_LMS_BIN"),
+            context_length=int(os.getenv("CAAL_LMSTUDIO_CONTEXT_LENGTH", "32768")),
+            parallel=int(os.getenv("CAAL_LMSTUDIO_PARALLEL", "4")),
         )
 
     async def _publish_memory_reconnect(trip: MemoryTrip) -> None:
@@ -952,19 +1066,44 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         except Exception as error:
             logger.warning("Could not record memory shutdown notice: %s", error)
 
+    async def _run_post_clearance_maintenance() -> None:
+        """Checkpoint durable history, then leave the production prefix warm."""
+        summary_timeout = float(os.getenv("HISTORY_SUMMARY_TIMEOUT_SECONDS", "30"))
+        if summary_timeout > 0:
+            try:
+                async with inference_lock:
+                    await asyncio.wait_for(
+                        checkpoint_conversation_summary(
+                            conversation_store,
+                            conversation_id,
+                            caal_llm.provider_instance,
+                        ),
+                        timeout=summary_timeout,
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Post-clearance conversation summary timed out after %.1fs",
+                    summary_timeout,
+                )
+            except Exception as error:
+                logger.warning("Post-clearance conversation summary failed: %s", error)
+
+        current_tools = await discover_tools(assistant, caal_llm.provider_instance)
+        async with inference_lock:
+            warmed = await warm_prompt_prefix(
+                caal_llm.provider_instance,
+                stable_prompt=assistant._stable_prompt,
+                tools=current_tools,
+            )
+        logger.info("Stable prefix rehydration %s", "complete" if warmed else "skipped")
+
     async def _end_call_for_memory(trip: MemoryTrip) -> None:
         """Terminate this session on a memory trip.
 
-        mlx-lm exposes no way to cancel an in-flight request, so a generation
-        already under way is left to fail against the MLX ceiling rather than
-        being allowed to finish.
-
-        The retained cache is released by the shared teardown below rather than
-        here: the session is already terminated, so Qwen allocates nothing more
-        in the meantime, and clearing early would not touch an in-flight
-        request's own cache anyway.
+        Marking the agent terminated prevents new turns while LM Studio finishes
+        or aborts the in-flight request during session teardown.
         """
-        nonlocal memory_trip
+        nonlocal hard_reset_ready, memory_trip
         memory_trip = trip
         logger.warning("Memory guard tripped, ending session: %s", trip.reason)
 
@@ -973,9 +1112,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
         # At critical system pressure there may not be enough memory left to
         # close LiveKit, clear caches, and dispatch a replacement job. Reclaim
-        # Qwen first; breaking an in-flight request is intentional here.
+        # the model first; breaking an in-flight request is intentional here.
         if trip.restart_first:
-            await _restart_qwen(trip.reason)
+            hard_reset_ready = await _reload_model(trip.reason)
 
         # Surface it as system text in the transcript rather than speech. The
         # "tool" role is the transcript's system-activity lane and is already
@@ -983,12 +1122,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # never reaches the model. Speaking it would also mean holding the call
         # open for several seconds of TTS purely to narrate its own ending.
         await _record_memory_trip(trip)
-
-        # Critical pressure has already been relieved by the restart, so the
-        # desktop can begin replacing this job immediately. The graceful MLX
-        # path publishes only after cache recovery is verified in teardown.
-        if trip.restart_first:
-            await _publish_memory_reconnect(trip)
 
         # End the session the same way a hang-up does, so both paths run the
         # same teardown: closing it fires the "close" handler, which sets
@@ -1002,7 +1135,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             close_event.set()
 
     memory_guard_task = asyncio.create_task(
-        guard_loop(_end_call_for_memory, memory_config, qwen_base_url)
+        guard_loop(_end_call_for_memory, memory_config)
     )
 
     # Wait until session closes (room disconnects, memory pressure, etc.)
@@ -1011,14 +1144,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     finally:
         memory_guard_task.cancel()
         await asyncio.gather(memory_guard_task, return_exceptions=True)
-        if runtime["llm_provider"] == "openai_compatible" and not (
-            memory_trip and memory_trip.restart_first
-        ):
-            await asyncio.to_thread(
-                clear_local_qwen_cache,
-                runtime["openai_base_url"],
-            )
-
+        if session_prefix_warm_task and not session_prefix_warm_task.done():
+            session_prefix_warm_task.cancel()
+        if session_prefix_warm_task:
+            await asyncio.gather(session_prefix_warm_task, return_exceptions=True)
+        if rolling_summary_task and not rolling_summary_task.done():
+            rolling_summary_task.cancel()
+        if rolling_summary_task:
+            await asyncio.gather(rolling_summary_task, return_exceptions=True)
         speech_cache_urls: set[str] = set()
         if runtime["stt_provider"] == "speaches":
             speech_cache_urls.add(SPEACHES_URL)
@@ -1027,11 +1160,26 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         for speech_url in speech_cache_urls:
             await asyncio.to_thread(clear_local_speech_cache, speech_url)
 
-        if memory_trip and not memory_trip.restart_first:
-            recovered = await wait_for_recovery(memory_config, qwen_base_url)
-            if not recovered:
-                await _restart_qwen("normal cache teardown did not reclaim MLX memory")
-            await _publish_memory_reconnect(memory_trip)
+        clearance_ready = True
+        if memory_trip:
+            if memory_trip.restart_first:
+                clearance_ready = hard_reset_ready is True
+            else:
+                recovered = await wait_for_recovery(memory_config)
+                if not recovered:
+                    clearance_ready = await _reload_model(
+                        "normal request teardown did not reclaim the model's memory"
+                    )
+
+        if clearance_ready:
+            await _run_post_clearance_maintenance()
+            if memory_trip:
+                await _publish_memory_reconnect(memory_trip)
+        else:
+            logger.error(
+                "Session memory was cleared, but Qwen did not become ready; "
+                "leaving the call disconnected"
+            )
     # Returning from the entrypoint does not finalize a LiveKit job. Explicitly
     # shut it down so its agent participant leaves the room before the desktop
     # reconnects for a different conversation. Otherwise the stale participant
@@ -1095,19 +1243,49 @@ def preload_models():
     if llm_provider == "groq":
         logger.info("  Skipping LLM preload (using Groq)")
     elif llm_provider == "openai_compatible":
-        base_url = (
-            settings.get("openai_base_url")
-            or os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-        ).rstrip("/")
+        runtime = get_runtime_settings()
+
+        async def _warm_openai_service_prefix() -> bool:
+            preload_llm = CAALLLM.from_settings(runtime)
+            preload_memory = ShortTermMemory()
+            preload_memory.reload()
+            tool_context = ToolContext(
+                mcp_configs=load_mcp_config(),
+                short_term_memory=preload_memory,
+                provider=preload_llm.provider_instance,
+            )
+            try:
+                await tool_context.ensure_mcp_initialized()
+                tools = await discover_tools(
+                    tool_context, preload_llm.provider_instance
+                )
+                return await warm_prompt_prefix(
+                    preload_llm.provider_instance,
+                    stable_prompt=load_prompt(runtime.get("language", "en")),
+                    tools=tools,
+                )
+            finally:
+                await asyncio.gather(
+                    *(
+                        server.aclose()
+                        for server in tool_context._caal_mcp_servers.values()
+                    ),
+                    return_exceptions=True,
+                )
+
         try:
-            logger.info(f"  Checking OpenAI-compatible LLM: {base_url}")
-            response = requests.get(f"{base_url}/models", timeout=30)
-            if response.status_code == 200:
-                logger.info("  ✓ LLM ready")
+            logger.info(
+                "  Warming OpenAI-compatible model/runtime and exact tool prefix"
+            )
+            warmed = asyncio.run(_warm_openai_service_prefix())
+            if warmed:
+                logger.info(
+                    "  ✓ LLM model, runtime, kernels, and stable prompt ready"
+                )
             else:
-                logger.warning(f"  LLM readiness check returned {response.status_code}")
+                logger.warning("  Stable LLM prefix warm-up did not complete")
         except Exception as e:
-            logger.warning(f"  Failed to reach OpenAI-compatible LLM: {e}")
+            logger.warning(f"  Failed to warm OpenAI-compatible LLM: {e}")
     else:
         ollama_host = settings.get("ollama_host") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         ollama_model = settings.get("ollama_model") or os.getenv("OLLAMA_MODEL", "ministral-3:8b")

@@ -18,10 +18,7 @@ from pathlib import Path
 from typing import Any
 
 SERVICE_MARKERS = {
-    # Matches both the CAAL launcher wrapper (scripts/mlx_qwen_server.py)
-    # and a stock "-m mlx_lm server" invocation. The pid file already
-    # pins the process; these markers only guard against a reused pid.
-    "qwen": ("mlx", "server"),
+    "model": ("lmstudio_model_server.py",),
     "speech": ("local_speech_server.py",),
     "n8n": ("n8n/bin/n8n",),
     "livekit": ("livekit-server",),
@@ -33,15 +30,13 @@ SERVICE_MARKERS = {
 # whole system-metrics block and leaving every background sample empty.
 MEMORY_PRESSURE_BIN = "/usr/bin/memory_pressure"
 SYSCTL_BIN = "/usr/sbin/sysctl"
+# The LM Studio daemon. Its inference workers are ordinary node executables, so
+# they are reached by walking the process tree rather than by matching a name.
+LMSTUDIO_DAEMON_COMM = "llmster"
 GIB = 1024**3
 DEFAULT_SAMPLE_SECONDS = 60
 DEFAULT_DEEP_SECONDS = 300
 DEFAULT_MAX_LOG_BYTES = 20 * 1024 * 1024
-PROMPT_CACHE_RE = re.compile(
-    r"Prompt Cache:\s+(?P<count>\d+) sequences,\s+"
-    r"(?P<size>[0-9.]+)\s+(?P<unit>[KMGT]?B)",
-    re.IGNORECASE,
-)
 SWAP_RE = re.compile(
     r"total\s*=\s*(?P<total>[0-9.]+)(?P<total_unit>[KMG])\s+"
     r"used\s*=\s*(?P<used>[0-9.]+)(?P<used_unit>[KMG])\s+"
@@ -74,18 +69,6 @@ def parse_swapusage(text: str) -> dict[str, int]:
         unit = match.group(f"{field}_unit").upper()
         result[f"swap_{field}_bytes"] = int(value * UNIT_BYTES[unit])
     return result
-
-
-def parse_prompt_cache(text: str) -> dict[str, int] | None:
-    matches = list(PROMPT_CACHE_RE.finditer(text))
-    if not matches:
-        return None
-    match = matches[-1]
-    unit = match.group("unit").upper()
-    return {
-        "sequences": int(match.group("count")),
-        "bytes": int(float(match.group("size")) * UNIT_BYTES[unit]),
-    }
 
 
 def parse_footprint(
@@ -192,7 +175,51 @@ def _service_processes(
             "pids": sorted(service_pids),
             "rss_bytes": sum(processes[pid]["rss_bytes"] for pid in service_pids),
         }
+
+    # llmster is intentionally detached from CAAL's small supervisor wrapper.
+    # Attribute the daemon and its inference children to the generic model lane.
+    lmstudio_roots = _executable_pids(LMSTUDIO_DAEMON_COMM)
+    if lmstudio_roots and "model" in services:
+        pending = list(lmstudio_roots)
+        model_pids = set(services["model"]["pids"])
+        while pending:
+            pid = pending.pop()
+            if pid in model_pids:
+                continue
+            model_pids.add(pid)
+            pid_services[pid] = "model"
+            pending.extend(children.get(pid, []))
+        services["model"] = {
+            "pids": sorted(model_pids),
+            "rss_bytes": sum(processes[pid]["rss_bytes"] for pid in model_pids),
+        }
     return pid_services, services
+
+
+def _executable_pids(comm: str) -> list[int]:
+    """Return the pids whose executable is named ``comm``.
+
+    Matching the executable rather than the command line matters: an unrelated
+    process whose arguments merely mention LM Studio - a shell pipeline, an
+    editor, this monitor's own diagnostics - must not be attributed to the
+    model lane, and llmster's own command line carries no bundle path to match.
+    """
+    try:
+        output = _run(["ps", "-axo", "pid=,comm="], timeout=10)
+    except (MonitorError, subprocess.TimeoutExpired, OSError):
+        return []
+    pids = []
+    for raw_line in output.splitlines():
+        parts = raw_line.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if os.path.basename(parts[1]) == comm:
+            pids.append(pid)
+    return pids
 
 
 def _system_metrics() -> dict[str, int | float]:
@@ -209,16 +236,6 @@ def _system_metrics() -> dict[str, int | float]:
     except (MonitorError, subprocess.TimeoutExpired, OSError):
         pass
     return metrics
-
-
-def _latest_prompt_cache(project: Path) -> dict[str, int] | None:
-    path = project / ".native" / "logs" / "qwen.log"
-    try:
-        with path.open("rb") as source:
-            source.seek(max(0, path.stat().st_size - 256 * 1024))
-            return parse_prompt_cache(source.read().decode(errors="replace"))
-    except OSError:
-        return None
 
 
 def _deep_footprint(pid_services: dict[int, str]) -> dict[str, dict[str, int]]:
@@ -247,8 +264,6 @@ def collect_sample(project: Path, *, deep: bool) -> dict[str, Any]:
         "system": _system_metrics(),
         "services": services,
     }
-    if prompt_cache := _latest_prompt_cache(project):
-        record["qwen_prompt_cache"] = prompt_cache
     if deep:
         footprints = _deep_footprint(pid_services)
         for service, metrics in footprints.items():
@@ -398,17 +413,6 @@ def report(log_path: Path, hours: float) -> None:
             "System swap: "
             f"{_gib(swap_values[0])} → {_gib(swap_values[-1])}; "
             f"peak {_gib(max(swap_values))}"
-        )
-    cache_values = [
-        record.get("qwen_prompt_cache", {}).get("bytes", 0) for record in all_records
-    ]
-    cache_counts = [
-        record.get("qwen_prompt_cache", {}).get("sequences", 0) for record in all_records
-    ]
-    if cache_values:
-        print(
-            f"Qwen prompt cache peak: {_gib(max(cache_values))} "
-            f"({max(cache_counts)} sequences)"
         )
     gpu_peak = max(
         record["totals"].get("gpu_dirty_bytes", 0) for record in deep_records

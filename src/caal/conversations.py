@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_REHYDRATE_MESSAGES = 40
-DEFAULT_REHYDRATE_MAX_CHARS = 6000
+DEFAULT_REHYDRATE_MESSAGES = 4
+DEFAULT_REHYDRATE_MAX_CHARS = 1500
 
 
 @dataclass(frozen=True)
@@ -278,7 +278,12 @@ class ConversationStore:
                 """
                 SELECT rowid, role, content
                 FROM messages
-                WHERE conversation_id = ? AND role IN ('user', 'assistant')
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
                 ORDER BY rowid DESC
                 LIMIT ?
                 """,
@@ -288,7 +293,12 @@ class ConversationStore:
                 """
                 SELECT COUNT(*) AS count
                 FROM messages
-                WHERE conversation_id = ? AND role IN ('user', 'assistant')
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
                 """,
                 (conversation_id,),
             ).fetchone()["count"]
@@ -309,6 +319,79 @@ class ConversationStore:
         ]
         return ContextWindow(
             messages=messages,
+            truncated=len(selected) < total,
+            oldest_rowid=int(selected[0]["rowid"]) if selected else None,
+        )
+
+    def rehydration_window(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+        max_chars: int | None = None,
+    ) -> ContextWindow:
+        """Return a bounded recent tail after the durable summary checkpoint."""
+        limit = (
+            int(os.getenv("HISTORY_REHYDRATE_MESSAGES", str(DEFAULT_REHYDRATE_MESSAGES)))
+            if limit is None
+            else limit
+        )
+        max_chars = (
+            int(os.getenv("HISTORY_REHYDRATE_MAX_CHARS", str(DEFAULT_REHYDRATE_MAX_CHARS)))
+            if max_chars is None
+            else max_chars
+        )
+        if limit <= 0 or max_chars <= 0:
+            return ContextWindow(messages=[], truncated=False, oldest_rowid=None)
+
+        _, summarized_through = self.get_summary(conversation_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT rowid, role, content
+                FROM messages
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND rowid > ?
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
+                ORDER BY rowid DESC
+                LIMIT ?
+                """,
+                (conversation_id, summarized_through, limit),
+            ).fetchall()
+            total = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND rowid > ?
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
+                """,
+                (conversation_id, summarized_through),
+            ).fetchone()["count"]
+
+        selected: list[sqlite3.Row] = []
+        character_count = 0
+        for row in rows:
+            content_length = len(row["content"])
+            if selected and character_count + content_length > max_chars:
+                break
+            selected.append(row)
+            character_count += content_length
+
+        selected.reverse()
+        return ContextWindow(
+            messages=[
+                {"role": str(row["role"]), "content": str(row["content"])}
+                for row in selected
+            ],
             truncated=len(selected) < total,
             oldest_rowid=int(selected[0]["rowid"]) if selected else None,
         )
@@ -340,22 +423,30 @@ class ConversationStore:
         conversation_id: str,
         *,
         after_rowid: int,
-        before_rowid: int,
         max_chars: int,
+        before_rowid: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return the next chronological chunk eligible for summarization."""
+        before_clause = "AND rowid < ?" if before_rowid is not None else ""
+        parameters: tuple[Any, ...] = (conversation_id, after_rowid)
+        if before_rowid is not None:
+            parameters += (before_rowid,)
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT rowid, role, content
                 FROM messages
                 WHERE conversation_id = ?
                   AND role IN ('user', 'assistant')
                   AND rowid > ?
-                  AND rowid < ?
+                  {before_clause}
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
                 ORDER BY rowid
                 """,
-                (conversation_id, after_rowid, before_rowid),
+                parameters,
             ).fetchall()
 
         selected: list[dict[str, Any]] = []
@@ -368,29 +459,62 @@ class ConversationStore:
             character_count += content_length
         return selected
 
+    def unsummarized_stats(self, conversation_id: str) -> tuple[int, int]:
+        """Return eligible message count and characters after the checkpoint."""
+        _, summarized_through = self.get_summary(conversation_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count,
+                       COALESCE(SUM(LENGTH(content)), 0) AS characters
+                FROM messages
+                WHERE conversation_id = ?
+                  AND role IN ('user', 'assistant')
+                  AND rowid > ?
+                  AND NOT (
+                      role = 'assistant'
+                      AND COALESCE(json_extract(metadata, '$.interrupted'), 0) = 1
+                  )
+                """,
+                (conversation_id, summarized_through),
+            ).fetchone()
+        return int(row["count"]), int(row["characters"])
+
     def save_summary(
         self,
         conversation_id: str,
         summary: str,
         *,
         through_rowid: int,
-    ) -> None:
+        expected_through_rowid: int | None = None,
+    ) -> bool:
         text = summary.strip()
         if not text:
             raise ValueError("Conversation summaries cannot be empty")
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE conversations
-                SET summary = ?, summary_through_rowid = ?
-                WHERE id = ? AND summary_through_rowid <= ?
-                """,
-                (text, through_rowid, conversation_id, through_rowid),
-            )
+            if expected_through_rowid is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE conversations
+                    SET summary = ?, summary_through_rowid = ?
+                    WHERE id = ? AND summary_through_rowid <= ?
+                    """,
+                    (text, through_rowid, conversation_id, through_rowid),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE conversations
+                    SET summary = ?, summary_through_rowid = ?
+                    WHERE id = ? AND summary_through_rowid = ?
+                    """,
+                    (text, through_rowid, conversation_id, expected_through_rowid),
+                )
             if not cursor.rowcount and not connection.execute(
                 "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone():
                 raise KeyError(conversation_id)
+            return bool(cursor.rowcount)
 
     def delete(self, conversation_id: str) -> str:
         with self._connect() as connection:

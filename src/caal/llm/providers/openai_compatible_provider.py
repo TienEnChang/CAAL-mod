@@ -103,8 +103,8 @@ class OpenAICompatibleProvider(LLMProvider):
         request_kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "temperature": kwargs.get("temperature", self._temperature),
+            "max_tokens": kwargs.get("max_tokens", self._max_tokens),
             "stream": False,
         }
 
@@ -163,8 +163,8 @@ class OpenAICompatibleProvider(LLMProvider):
         request_kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "temperature": kwargs.get("temperature", self._temperature),
+            "max_tokens": kwargs.get("max_tokens", self._max_tokens),
             "stream": True,
         }
 

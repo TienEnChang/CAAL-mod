@@ -159,6 +159,92 @@ def test_summary_state_and_source_exclude_tool_rows(tmp_path):
     )
 
 
+def test_rehydration_uses_only_bounded_messages_after_summary_checkpoint(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(conversation_id, role="user", content="Already summarized")
+    first = store.unsummarized_messages(
+        conversation_id,
+        after_rowid=0,
+        max_chars=100,
+    )[0]
+    store.save_summary(
+        conversation_id,
+        "Earlier memory",
+        through_rowid=first["rowid"],
+    )
+    store.append_message(conversation_id, role="assistant", content="Recent answer")
+    store.append_message(conversation_id, role="user", content="Latest question")
+
+    window = store.rehydration_window(conversation_id, limit=1, max_chars=100)
+
+    assert window.messages == [{"role": "user", "content": "Latest question"}]
+    assert window.truncated is True
+
+
+def test_interrupted_assistant_output_is_not_rehydrated(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(conversation_id, role="user", content="Question")
+    store.append_message(
+        conversation_id,
+        role="assistant",
+        content="Partial answer",
+        metadata={"interrupted": True},
+    )
+
+    assert store.rehydration_window(conversation_id).messages == [
+        {"role": "user", "content": "Question"}
+    ]
+
+
+def test_summary_checkpoint_compare_and_swap_rejects_stale_writer(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(conversation_id, role="user", content="First")
+    first_rowid = store.unsummarized_messages(
+        conversation_id,
+        after_rowid=0,
+        max_chars=100,
+    )[0]["rowid"]
+
+    assert store.save_summary(
+        conversation_id,
+        "Current",
+        through_rowid=first_rowid,
+        expected_through_rowid=0,
+    ) is True
+    assert store.save_summary(
+        conversation_id,
+        "Stale",
+        through_rowid=first_rowid,
+        expected_through_rowid=0,
+    ) is False
+    assert store.get_summary(conversation_id) == ("Current", first_rowid)
+
+
+def test_unsummarized_stats_follow_checkpoint_and_exclude_interrupted_output(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    conversation_id = store.ensure_active()
+    store.append_message(conversation_id, role="user", content="old")
+    old_rowid = store.unsummarized_messages(
+        conversation_id,
+        after_rowid=0,
+        max_chars=100,
+    )[0]["rowid"]
+    store.save_summary(conversation_id, "Old summary", through_rowid=old_rowid)
+    store.append_message(conversation_id, role="user", content="four")
+    store.append_message(
+        conversation_id,
+        role="assistant",
+        content="ignored",
+        metadata={"interrupted": True},
+    )
+    store.append_message(conversation_id, role="assistant", content="five!")
+
+    assert store.unsummarized_stats(conversation_id) == (2, 9)
+
+
 def test_existing_database_is_migrated_for_summaries(tmp_path):
     database_path = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(database_path) as connection:

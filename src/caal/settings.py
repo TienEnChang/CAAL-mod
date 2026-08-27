@@ -448,6 +448,87 @@ def save_greetings(language: str, content: str) -> None:
         raise
 
 
+def _configured_identity_context(agent_name: str | None = None) -> str:
+    configured_name = agent_name
+    if configured_name is None:
+        configured_name = get_setting("agent_name", "Cal")
+    configured_name = " ".join(str(configured_name).split())[:64] or "Cal"
+    quoted_name = json.dumps(configured_name, ensure_ascii=False)
+    return (
+        "# Configured Assistant Identity\n\n"
+        f"Your configured name is {quoted_name}. Use this exact name when "
+        "introducing yourself or answering questions about your name. This "
+        "configured identity overrides generic product names such as CAAL or "
+        "Cal elsewhere in this prompt. Do not refuse to use the configured name."
+    )
+
+
+def load_stable_prompt(
+    *,
+    timezone_display: str = "Pacific Time",
+    language: str = "en",
+    prompt_name: str | None = None,
+    agent_name: str | None = None,
+) -> str:
+    """Load the call-invariant system instructions used for prefix caching."""
+    template = load_prompt_content(prompt_name=prompt_name, language=language)
+    template = template.replace("{{CURRENT_DATE_CONTEXT}}", "").replace(
+        "{{TIMEZONE}}", timezone_display
+    )
+    return f"{_configured_identity_context(agent_name)}\n\n{template}".strip()
+
+
+def load_session_date_context(
+    timezone_id: str = "America/Los_Angeles",
+    timezone_display: str = "Pacific Time",
+    language: str = "en",
+) -> str:
+    """Return date/time metadata that changes between call prefixes."""
+    from caal.utils.formatting import (
+        format_date_speech_friendly,
+        format_time_speech_friendly,
+    )
+
+    now = datetime.now(ZoneInfo(timezone_id))
+
+    if language == "fr":
+        return (
+            f"Nous sommes le {format_date_speech_friendly(now, language='fr')}. "
+            f"Il est {format_time_speech_friendly(now, language='fr')}, "
+            f"{timezone_display}."
+        )
+    if language == "it":
+        return (
+            f"Oggi è {format_date_speech_friendly(now, language='it')}. "
+            f"Sono le {format_time_speech_friendly(now, language='it')}, "
+            f"{timezone_display}."
+        )
+    if language == "pt":
+        return (
+            f"Hoje é {format_date_speech_friendly(now, language='pt')}. "
+            f"São {format_time_speech_friendly(now, language='pt')}, "
+            f"{timezone_display}."
+        )
+    if language == "da":
+        return (
+            f"I dag er det {format_date_speech_friendly(now, language='da')}. "
+            f"Klokken er {format_time_speech_friendly(now, language='da')}, "
+            f"{timezone_display}."
+        )
+    if language == "ro":
+        return (
+            f"Astăzi este {format_date_speech_friendly(now, language='ro')}. "
+            f"Ora este {format_time_speech_friendly(now, language='ro')}, "
+            f"{timezone_display}."
+        )
+    return (
+        f"Today is {format_date_speech_friendly(now, language=language)}. "
+        f"The current time is "
+        f"{format_time_speech_friendly(now, language=language)} "
+        f"{timezone_display}."
+    )
+
+
 def load_prompt_with_context(
     timezone_id: str = "America/Los_Angeles",
     timezone_display: str = "Pacific Time",
@@ -469,71 +550,18 @@ def load_prompt_with_context(
     Returns:
         Prompt with {{CURRENT_DATE_CONTEXT}} and {{TIMEZONE}} replaced
     """
-    from caal.utils.formatting import (
-        format_date_speech_friendly,
-        format_time_speech_friendly,
+    stable_prompt = load_stable_prompt(
+        timezone_display=timezone_display,
+        language=language,
+        prompt_name=prompt_name,
+        agent_name=agent_name,
     )
-
-    template = load_prompt_content(prompt_name=prompt_name, language=language)
-
-    configured_name = agent_name
-    if configured_name is None:
-        configured_name = get_setting("agent_name", "Cal")
-    configured_name = " ".join(str(configured_name).split())[:64] or "Cal"
-    quoted_name = json.dumps(configured_name, ensure_ascii=False)
-
-    identity_context = (
-        "# Configured Assistant Identity\n\n"
-        f"Your configured name is {quoted_name}. Use this exact name when "
-        "introducing yourself or answering questions about your name. This "
-        "configured identity overrides generic product names such as CAAL or "
-        "Cal elsewhere in this prompt. Do not refuse to use the configured name."
+    date_context = load_session_date_context(
+        timezone_id=timezone_id,
+        timezone_display=timezone_display,
+        language=language,
     )
-
-    now = datetime.now(ZoneInfo(timezone_id))
-
-    if language == "fr":
-        date_context = (
-            f"Nous sommes le {format_date_speech_friendly(now, language='fr')}. "
-            f"Il est {format_time_speech_friendly(now, language='fr')}, "
-            f"{timezone_display}."
-        )
-    elif language == "it":
-        date_context = (
-            f"Oggi è {format_date_speech_friendly(now, language='it')}. "
-            f"Sono le {format_time_speech_friendly(now, language='it')}, "
-            f"{timezone_display}."
-        )
-    elif language == "pt":
-        date_context = (
-            f"Hoje é {format_date_speech_friendly(now, language='pt')}. "
-            f"São {format_time_speech_friendly(now, language='pt')}, "
-            f"{timezone_display}."
-        )
-    elif language == "da":
-        date_context = (
-            f"I dag er det {format_date_speech_friendly(now, language='da')}. "
-            f"Klokken er {format_time_speech_friendly(now, language='da')}, "
-            f"{timezone_display}."
-        )
-    elif language == "ro":
-        date_context = (
-            f"Astăzi este {format_date_speech_friendly(now, language='ro')}. "
-            f"Ora este {format_time_speech_friendly(now, language='ro')}, "
-            f"{timezone_display}."
-        )
-    else:
-        date_context = (
-            f"Today is {format_date_speech_friendly(now, language=language)}. "
-            f"The current time is "
-            f"{format_time_speech_friendly(now, language=language)} "
-            f"{timezone_display}."
-        )
-
-    prompt = template.replace("{{CURRENT_DATE_CONTEXT}}", date_context)
-    prompt = prompt.replace("{{TIMEZONE}}", timezone_display)
-
-    return f"{identity_context}\n\n{prompt}"
+    return f"{stable_prompt}\n\n# Current Session\n\n{date_context}"
 
 
 def custom_prompt_exists() -> bool:

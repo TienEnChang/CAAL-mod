@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./start-native.sh                       Start and supervise the full stack
-#   ./start-native.sh --models              Run Qwen + speech services only
+#   ./start-native.sh --models              Run LM Studio + speech services only
 #   ./start-native.sh --app                 Run app services; reuse healthy models
 #   ./start-native.sh --restart <service>   Restart one service in place
 #   ./start-native.sh --install-n8n         Install the bundled n8n runtime
@@ -42,8 +42,6 @@ LOG_MAX_BYTES="${CAAL_LOG_MAX_BYTES:-20971520}"
 PID_DIR="$RUNTIME_DIR/pids"
 SUPERVISOR_DIR="$RUNTIME_DIR/supervisors"
 
-MLX_MODEL_VENV="$RUNTIME_DIR/mlx-model-venv"
-MODEL_PYTHON="${CAAL_MLX_PYTHON:-$MLX_MODEL_VENV/bin/python}"
 MLX_SPEECH_VENV="$RUNTIME_DIR/mlx-speech-venv"
 SPEECH_PYTHON="${CAAL_MLX_SPEECH_PYTHON:-$MLX_SPEECH_VENV/bin/python}"
 UV_BIN="${CAAL_UV_BIN:-$(command -v uv || true)}"
@@ -64,14 +62,12 @@ N8N_BIN="$N8N_PREFIX/node_modules/n8n/bin/n8n"
 N8N_DATA_DIR="$DATA_DIR/n8n"
 N8N_KEY_FILE="$CONFIG_DIR/n8n-encryption-key"
 
-QWEN_MODEL="${CAAL_QWEN_MODEL:-mlx-community/Qwen3-4B-Instruct-2507-4bit}"
-QWEN_PORT="${CAAL_QWEN_PORT:-8100}"
-# The system prompt embeds the current wall-clock minute, so every agent job
-# starts a KV-cache branch no later job can reuse. mlx-lm retains 10 of these by
-# default, which is how qwen grew ~0.5 GiB per call. Retaining one evicts the
-# previous call's dead branch on the next insert; within-call reuse is
-# unaffected, since successive turns extend the same branch.
-QWEN_PROMPT_CACHE_SIZE="${CAAL_QWEN_PROMPT_CACHE_SIZE:-1}"
+LMS_BIN="${CAAL_LMS_BIN:-$(command -v lms || echo "$HOME/.lmstudio/bin/lms")}"
+LMSTUDIO_MODEL="${CAAL_LMSTUDIO_MODEL:-qwen3-4b-instruct-2507}"
+LMSTUDIO_INSTANCE_ID="${CAAL_LMSTUDIO_INSTANCE_ID:-caal-model}"
+LMSTUDIO_PORT="${CAAL_LMSTUDIO_PORT:-8100}"
+LMSTUDIO_CONTEXT_LENGTH="${CAAL_LMSTUDIO_CONTEXT_LENGTH:-32768}"
+LMSTUDIO_PARALLEL="${CAAL_LMSTUDIO_PARALLEL:-4}"
 SPEECH_PORT="${CAAL_SPEECH_PORT:-8001}"
 LIVEKIT_PORT="${CAAL_LIVEKIT_PORT:-7880}"
 LIVEKIT_RTC_TCP_PORT="${CAAL_LIVEKIT_RTC_TCP_PORT:-7881}"
@@ -99,13 +95,13 @@ n8n_is_enabled() {
 
 # n8n starts before the agent so workflow tools exist at discovery time.
 if n8n_is_enabled; then
-  ALL_SERVICES=(qwen speech n8n livekit agent frontend)
+  ALL_SERVICES=(model speech n8n livekit agent frontend)
   APP_SERVICES=(n8n livekit agent frontend)
 else
-  ALL_SERVICES=(qwen speech livekit agent frontend)
+  ALL_SERVICES=(model speech livekit agent frontend)
   APP_SERVICES=(livekit agent frontend)
 fi
-MODEL_SERVICES=(qwen speech)
+MODEL_SERVICES=(model speech)
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR" "$PID_DIR" "$SUPERVISOR_DIR"
 
@@ -115,9 +111,9 @@ CAAL native Apple Silicon launcher
 
 Commands:
   (no arguments)              Start and supervise every service
-  --models                    Start and supervise Qwen, Whisper, and Kokoro
+  --models                    Start and supervise LM Studio, Whisper, and Kokoro
   --app                       Start LiveKit, agent, and frontend using healthy models
-  --restart <service>         Restart qwen, speech, n8n, livekit, agent, or frontend
+  --restart <service>         Restart model, speech, n8n, livekit, agent, or frontend
   --install-n8n               Install the bundled n8n runtime for workflow tools
   --setup-remote              Show how to publish CAAL on your tailnet
   --stop                      Stop every native service
@@ -133,10 +129,13 @@ Persistent runtime:
   CAAL_TMUX_SESSION           Base tmux session name ($TMUX_SESSION_BASE)
 
 Port overrides:
-  CAAL_QWEN_PORT              Qwen OpenAI-compatible API ($QWEN_PORT)
-  CAAL_QWEN_PROMPT_CACHE_SIZE Qwen KV caches retained ($QWEN_PROMPT_CACHE_SIZE)
+  CAAL_LMSTUDIO_MODEL         Any model key shown by 'lms ls' ($LMSTUDIO_MODEL)
+  CAAL_LMSTUDIO_INSTANCE_ID   CAAL-owned API identifier ($LMSTUDIO_INSTANCE_ID)
+  CAAL_LMSTUDIO_PORT          LM Studio OpenAI-compatible API ($LMSTUDIO_PORT)
+  CAAL_LMSTUDIO_CONTEXT_LENGTH Context window ($LMSTUDIO_CONTEXT_LENGTH)
+  CAAL_LMSTUDIO_PARALLEL      Concurrent LM Studio predictions ($LMSTUDIO_PARALLEL)
+  CAAL_LMS_BIN                LM Studio CLI ($LMS_BIN)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
-  CAAL_MLX_PYTHON             Existing Python environment with mlx-lm
   CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
   CAAL_UV_PYTHON              Python version/interpreter used for native environments
   CAAL_LIVEKIT_PORT           LiveKit WebSocket/API ($LIVEKIT_PORT)
@@ -145,17 +144,15 @@ Port overrides:
   CAAL_FRONTEND_PORT          CAAL web interface ($FRONTEND_PORT)
   CAAL_N8N_PORT               n8n editor and webhooks ($N8N_PORT)
   CAAL_LOG_MAX_BYTES          Rotate a service log past this size (20 MiB)
-  CAAL_QWEN_WIRED_LIMIT_GB    Cap on Qwen's wired memory (6)
-  CAAL_QWEN_MEMORY_LIMIT_GB   Cap on Qwen's allocations (7)
   CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
   CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
   Memory guard:
-  CAAL_QWEN_MEMORY_TRIP_GB         Qwen's own allocation ceiling (6)
-  CAAL_QWEN_MEMORY_RECOVERY_GB     Allocation required after cache clear (4.5)
+  CAAL_MODEL_MEMORY_TRIP_GB        Model footprint ceiling (8)
+  CAAL_MODEL_MEMORY_RECOVERY_GB    Footprint required after teardown (6)
   CAAL_MEMORY_GUARD                false to disable the guard entirely
   CAAL_MEMORY_CHECK_SECONDS        Seconds between guard samples (2)
   CAAL_MEMORY_TIGHT_READINGS       Consecutive trips before acting (2)
-  CAAL_MEMORY_RECOVERY_TIMEOUT     Seconds to wait before restarting Qwen (20)
+  CAAL_MEMORY_RECOVERY_TIMEOUT     Seconds to wait before reloading (20)
 
 n8n workflow tools:
   CAAL_N8N_ENABLED            auto (run once installed), true, or false
@@ -318,7 +315,7 @@ stop_tmux_sessions() {
 
 is_service() {
   case "$1" in
-    qwen|speech|n8n|livekit|agent|frontend) return 0 ;;
+    model|speech|n8n|livekit|agent|frontend) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -363,7 +360,7 @@ stop_supervisors() {
 
 service_port() {
   case "$1" in
-    qwen) echo "$QWEN_PORT" ;;
+    model) echo "$LMSTUDIO_PORT" ;;
     speech) echo "$SPEECH_PORT" ;;
     n8n) echo "$N8N_PORT" ;;
     livekit) echo "$LIVEKIT_PORT" ;;
@@ -374,7 +371,7 @@ service_port() {
 
 service_url() {
   case "$1" in
-    qwen) echo "http://127.0.0.1:$QWEN_PORT/v1/models" ;;
+    model) echo "http://127.0.0.1:$LMSTUDIO_PORT/v1/models" ;;
     speech) echo "http://127.0.0.1:$SPEECH_PORT/health" ;;
     n8n) echo "http://127.0.0.1:$N8N_PORT/healthz" ;;
     livekit) echo "http://127.0.0.1:$LIVEKIT_PORT" ;;
@@ -396,7 +393,7 @@ pid_matches_service() {
   kill -0 "$pid" 2>/dev/null || return 1
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   case "$name:$command" in
-    qwen:*mlx_qwen_server.py*|qwen:*mlx_lm*server*) return 0 ;;
+    model:*lmstudio_model_server.py*) return 0 ;;
     speech:*local_speech_server.py*) return 0 ;;
     n8n:*n8n/bin/n8n*) return 0 ;;
     livekit:*livekit-server*) return 0 ;;
@@ -457,7 +454,7 @@ stop_services() {
 }
 
 stop_all() {
-  stop_services frontend agent livekit n8n speech qwen
+  stop_services frontend agent livekit n8n speech model
 }
 
 status_one() {
@@ -492,9 +489,8 @@ status_supervisors() {
 validate_service_dependency() {
   local name="$1" executable
   case "$name" in
-    qwen)
-      ensure_mlx_model_environment
-      executable="$MODEL_PYTHON"
+    model)
+      executable="$LMS_BIN"
       ;;
     speech)
       ensure_mlx_speech_environment
@@ -516,21 +512,6 @@ validate_service_dependency() {
     echo "Missing native frontend build: $NEXT_SERVER" >&2
     return 1
   fi
-}
-
-ensure_mlx_model_environment() {
-  if [[ -x "$MODEL_PYTHON" ]] && "$MODEL_PYTHON" -c \
-    'import mlx_lm' >/dev/null 2>&1; then
-    return 0
-  fi
-  [[ -n "$UV_BIN" && -x "$UV_BIN" ]] || {
-    echo "Missing uv; install it or set CAAL_MLX_PYTHON" >&2
-    return 1
-  }
-  echo "Creating dedicated MLX model environment..."
-  "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_MODEL_VENV"
-  "$UV_BIN" pip install --python "$MODEL_PYTHON" \
-    -r "$PROJECT_DIR/requirements-mlx-model.txt"
 }
 
 ensure_mlx_speech_environment() {
@@ -719,7 +700,7 @@ managed_tmux_mode_for_service() {
   local service="$1"
   if supervisor_is_running all && tmux_session_is_running all; then
     echo all
-  elif [[ "$service" == "qwen" || "$service" == "speech" ]] && \
+  elif [[ "$service" == "model" || "$service" == "speech" ]] && \
     supervisor_is_running models && tmux_session_is_running models; then
     echo models
   elif [[ "$service" == "livekit" || "$service" == "agent" || "$service" == "frontend" ]] && \
@@ -757,11 +738,13 @@ start_named() {
   local name="$1"
   validate_service_dependency "$name"
   case "$name" in
-    qwen)
-      echo "Starting Qwen: $QWEN_MODEL → http://127.0.0.1:$QWEN_PORT/v1"
-      start_service qwen "$MODEL_PYTHON" "$PROJECT_DIR/scripts/mlx_qwen_server.py" \
-        --model "$QWEN_MODEL" --host 127.0.0.1 --port "$QWEN_PORT" \
-        --prompt-cache-size "$QWEN_PROMPT_CACHE_SIZE"
+    model)
+      echo "Starting LM Studio: $LMSTUDIO_MODEL → http://127.0.0.1:$LMSTUDIO_PORT/v1"
+      start_service model "$AGENT_PYTHON" "$PROJECT_DIR/scripts/lmstudio_model_server.py" \
+        --lms "$LMS_BIN" --model "$LMSTUDIO_MODEL" --identifier "$LMSTUDIO_INSTANCE_ID" \
+        --port "$LMSTUDIO_PORT" \
+        --context-length "$LMSTUDIO_CONTEXT_LENGTH" \
+        --parallel "$LMSTUDIO_PARALLEL"
       ;;
     speech)
       echo "Starting MLX Whisper + MLX Kokoro → http://127.0.0.1:$SPEECH_PORT"
@@ -873,7 +856,7 @@ cleanup_all() {
 
 cleanup_models() {
   trap - EXIT
-  stop_services speech qwen >/dev/null 2>&1 || true
+  stop_services speech model >/dev/null 2>&1 || true
   unregister_supervisor models
 }
 
@@ -883,7 +866,11 @@ cleanup_app() {
   unregister_supervisor app
 }
 
-validate_port CAAL_QWEN_PORT "$QWEN_PORT"
+validate_port CAAL_LMSTUDIO_PORT "$LMSTUDIO_PORT"
+if ! [[ "$LMSTUDIO_PARALLEL" =~ ^[0-9]+$ ]] || (( LMSTUDIO_PARALLEL < 1 )); then
+  echo "Invalid CAAL_LMSTUDIO_PARALLEL: $LMSTUDIO_PARALLEL" >&2
+  exit 1
+fi
 validate_port CAAL_SPEECH_PORT "$SPEECH_PORT"
 validate_port CAAL_LIVEKIT_PORT "$LIVEKIT_PORT"
 validate_port CAAL_LIVEKIT_RTC_TCP_PORT "$LIVEKIT_RTC_TCP_PORT"
@@ -905,8 +892,11 @@ export CAAL_MEMORY_DIR="$DATA_DIR"
 export CAAL_PROMPT_DIR="$PROJECT_DIR/prompt"
 export LLM_PROVIDER="openai_compatible"
 export OPENAI_API_KEY="not-needed"
-export OPENAI_BASE_URL="http://127.0.0.1:$QWEN_PORT/v1"
-export OPENAI_MODEL="$QWEN_MODEL"
+export OPENAI_BASE_URL="http://127.0.0.1:$LMSTUDIO_PORT/v1"
+export OPENAI_MODEL="$LMSTUDIO_INSTANCE_ID"
+export CAAL_LMS_BIN="$LMS_BIN"
+export CAAL_LMSTUDIO_INSTANCE_ID
+export CAAL_LMSTUDIO_PARALLEL="$LMSTUDIO_PARALLEL"
 export STT_PROVIDER="speaches"
 export SPEACHES_URL="http://127.0.0.1:$SPEECH_PORT"
 export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-large-v3}"
@@ -940,7 +930,7 @@ if [[ "$TMUX_CHILD" != true ]]; then
     --restart)
       restart_service="${2:-}"
       is_service "$restart_service" || {
-        echo "Usage: ./start-native.sh --restart <qwen|speech|n8n|livekit|agent|frontend>" >&2
+        echo "Usage: ./start-native.sh --restart <model|speech|n8n|livekit|agent|frontend>" >&2
         exit 2
       }
       if restart_in_tmux "$restart_service"; then
@@ -1020,7 +1010,7 @@ case "${1:-}" in
   --restart)
     restart_service="${2:-}"
     is_service "$restart_service" || {
-      echo "Usage: ./start-native.sh --restart <qwen|speech|n8n|livekit|agent|frontend>" >&2
+      echo "Usage: ./start-native.sh --restart <model|speech|n8n|livekit|agent|frontend>" >&2
       exit 2
     }
     stop_one "$restart_service"
@@ -1034,7 +1024,7 @@ case "${1:-}" in
       exit 1
     fi
     stop_supervisor models
-    stop_services speech qwen
+    stop_services speech model
     register_supervisor models
     trap cleanup_models EXIT
     trap 'exit 130' INT
@@ -1079,7 +1069,7 @@ start_services "${ALL_SERVICES[@]}"
 
 echo
 echo "CAAL is ready: http://localhost:$FRONTEND_PORT"
-echo "Qwen: $QWEN_MODEL"
+echo "LM Studio: $LMSTUDIO_MODEL (API identifier: $LMSTUDIO_INSTANCE_ID)"
 echo "Whisper: $WHISPER_MODEL"
 echo "Kokoro: $TTS_MODEL ($TTS_VOICE)"
 echo "Press Ctrl-C to stop all native services."

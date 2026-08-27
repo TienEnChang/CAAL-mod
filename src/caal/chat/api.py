@@ -168,7 +168,9 @@ def _get_runtime_settings() -> dict:
             settings.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
         ),
         "openai_model": (
-            user_settings.get("openai_model") or os.getenv("OPENAI_MODEL", "")
+            os.getenv("CAAL_LMSTUDIO_INSTANCE_ID")
+            or user_settings.get("openai_model")
+            or os.getenv("OPENAI_MODEL", "")
         ),
         # OpenRouter
         "openrouter_api_key": (

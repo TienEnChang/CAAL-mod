@@ -1,3 +1,6 @@
+import asyncio
+from types import SimpleNamespace
+
 from caal.llm.providers import OpenAICompatibleProvider
 
 TOOLS = [
@@ -47,3 +50,38 @@ def test_ignores_unregistered_or_executable_calls():
         )
         is None
     )
+
+
+def test_chat_honors_per_request_generation_bounds():
+    provider = OpenAICompatibleProvider(
+        model="caal-model",
+        base_url="http://localhost:8100/v1",
+        temperature=0.7,
+        max_tokens=4096,
+    )
+    captured = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="OK", tool_calls=None)
+                )
+            ]
+        )
+
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    asyncio.run(
+        provider.chat(
+            messages=[{"role": "user", "content": "warm"}],
+            temperature=0,
+            max_tokens=1,
+        )
+    )
+
+    assert captured["temperature"] == 0
+    assert captured["max_tokens"] == 1

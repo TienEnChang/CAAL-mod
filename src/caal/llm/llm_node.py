@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..integrations.n8n import execute_n8n_workflow
 from ..memory import ShortTermMemory
+from ..prompt_lifecycle import compose_system_prompt
 from ..utils.formatting import strip_markdown_for_tts
 from .providers import LLMProvider
 
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["llm_node", "ToolDataCache"]
+__all__ = ["llm_node", "ToolDataCache", "discover_tools"]
 
 
 class ToolDataCache:
@@ -115,11 +116,12 @@ async def llm_node(
             tool_data_cache=tool_data_cache,
             short_term_memory=short_term_memory,
             max_turns=max_turns,
+            session_context=getattr(agent, "_session_context", None),
             conversation_recall=getattr(agent, "_conversation_recall", None),
         )
 
         # Discover tools from agent and MCP servers
-        tools = await _discover_tools(agent, provider)
+        tools = await discover_tools(agent, provider)
         if not tools:
             logger.warning("No tools discovered")
 
@@ -319,6 +321,7 @@ def _build_messages_from_context(
     tool_data_cache: ToolDataCache | None = None,
     short_term_memory: ShortTermMemory | None = None,
     max_turns: int = 20,
+    session_context: str | None = None,
     conversation_recall: str | None = None,
 ) -> list[dict]:
     """Build messages with sliding window and context injection.
@@ -337,7 +340,8 @@ def _build_messages_from_context(
         tool_data_cache: Cache of recent tool response data
         short_term_memory: Short-term memory for context awareness
         max_turns: Max conversation turns to keep (1 turn = user + assistant)
-        conversation_recall: Summary of older transcript turns, when truncated
+        session_context: Date, frozen user-memory snapshot, and durable recall
+        conversation_recall: Backward-compatible separately supplied summary
     """
     system_prompt = None
     chat_messages = []
@@ -395,7 +399,9 @@ def _build_messages_from_context(
 
     # 1. System prompt with dynamic context appended (single [SYSTEM_PROMPT] block)
     if system_prompt:
-        system_content = system_prompt["content"]
+        system_content = compose_system_prompt(
+            system_prompt["content"], session_context
+        )
 
         # Append tool data context
         if tool_data_cache:
@@ -405,7 +411,7 @@ def _build_messages_from_context(
 
         # Append short-term memory context (only after user has spoken)
         has_user_message = any(m["role"] == "user" for m in chat_messages)
-        if short_term_memory and has_user_message:
+        if short_term_memory and has_user_message and not session_context:
             memory_context = short_term_memory.get_context_message()
             if memory_context:
                 system_content += f"\n\n{memory_context}"
@@ -427,7 +433,7 @@ def _build_messages_from_context(
     return messages
 
 
-async def _discover_tools(agent, provider: LLMProvider | None = None) -> list[dict] | None:
+async def discover_tools(agent, provider: LLMProvider | None = None) -> list[dict] | None:
     """Discover tools from agent methods and MCP servers.
 
     Tools are cached on the agent instance after first discovery to avoid
@@ -517,6 +523,23 @@ async def _discover_tools(agent, provider: LLMProvider | None = None) -> list[di
     # Add agent-level tools (memory_short, web_search — non-LiveKit callers)
     if hasattr(agent, "_agent_tool_definitions") and agent._agent_tool_definitions:
         tools.extend(agent._agent_tool_definitions)
+
+    # LiveKit-reflected methods and the non-LiveKit context can expose the same
+    # logical tool through different registries. Keep one schema per function
+    # name, preferring the later canonical agent-level definition.
+    deduplicated: dict[str, dict] = {}
+    unnamed: list[dict] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(name, str):
+            deduplicated[name] = tool
+        else:
+            unnamed.append(tool)
+    tools = [
+        *(tool for _, tool in sorted(deduplicated.items())),
+        *unnamed,
+    ]
 
     # Let provider transform tools for its model (e.g. strip descriptions
     # for FunctionGemma).  Applied once before caching.

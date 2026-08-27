@@ -185,7 +185,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         };
         if (message.type !== 'memory_guard_trip') return;
 
-        // The agent has already recovered or restarted Qwen. Reuse the exact
+        // The agent has already recovered or reloaded the model. Reuse the exact
         // room replacement used by a manual conversation switch, but leave the
         // active conversation unchanged so the replacement job rehydrates it.
         void reconnectAround(async () => {
