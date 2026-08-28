@@ -84,6 +84,7 @@ from caal.model_cache import (  # noqa: E402
     clear_local_model_cache,
     drain_local_model_batch,
     restart_local_model_server,
+    unload_local_model,
 )
 from caal.prompt_lifecycle import (  # noqa: E402
     StablePromptBundle,
@@ -266,6 +267,27 @@ async def _warm_switched_model(model: str) -> bool:
             model,
             runtime.get("openai_model"),
         )
+
+    base_url = runtime.get("openai_base_url")
+    if base_url:
+        # mlx-lm's in-place swap drops the old model and starts reading the new
+        # model's weight file within the same call, before macOS has reclaimed
+        # the old model's pages. The two therefore coexist in the process's
+        # resident footprint for as long as that reclaim takes - measured at
+        # roughly 1.5s, during which RSS visibly doubles even though MLX's own
+        # active-allocation accounting never does, because the extra memory is
+        # the old model's not-yet-reclaimed pages plus the new file's raw
+        # bytes, neither of which the MLX allocator tracks.
+        #
+        # Unloading first serializes the two: the old model, its generation
+        # thread, and its cache are fully released and given a moment to settle
+        # before the new model's file read begins, so the two footprints never
+        # overlap. This only runs on a switch - there is no old model to
+        # release on a cold start - and it is safe to pay the extra latency
+        # here because switching is idle-only; nothing is waiting on the model
+        # while this runs.
+        await asyncio.to_thread(unload_local_model, base_url)
+
     await _build_stable_bundle(runtime, warm=True)
 
     # Warming leaves its own working memory behind. A call would release that in
