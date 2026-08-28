@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { RoomEvent } from 'livekit-client';
 import { useRoomContext } from '@livekit/components-react';
 
 export interface ToolStatus {
   id: string | null;
+  conversationId: string | null;
   toolUsed: boolean;
   toolNames: string[];
   toolParams: Record<string, unknown>[];
@@ -19,7 +20,7 @@ export type ToolActivity = ToolStatus & { id: string };
  * Hook to track tool usage status from the agent.
  * Listens for data packets with topic "tool_status" from the backend.
  */
-export function useToolStatus() {
+export function useToolStatus(conversationId: string | null = null) {
   const room = useRoomContext();
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
 
@@ -38,9 +39,12 @@ export function useToolStatus() {
       try {
         const decoder = new TextDecoder();
         const data = JSON.parse(decoder.decode(payload));
+        const packetConversationId = data.conversation_id ?? conversationId;
+        if (conversationId && packetConversationId !== conversationId) return;
 
         setToolStatus({
           id: data.id ?? null,
+          conversationId: packetConversationId ?? null,
           toolUsed: data.tool_used ?? false,
           toolNames: data.tool_names ?? [],
           toolParams: data.tool_params ?? [],
@@ -57,13 +61,15 @@ export function useToolStatus() {
     return () => {
       room.off(RoomEvent.DataReceived, handleDataReceived);
     };
-  }, [room]);
+  }, [conversationId, room]);
 
-  return toolStatus;
+  return toolStatus && (!conversationId || toolStatus.conversationId === conversationId)
+    ? toolStatus
+    : null;
 }
 
 /** Ordered tool activity rows for the transcript timeline. */
-export function useToolActivities() {
+export function useToolActivities(conversationId: string | null) {
   const room = useRoomContext();
   const [activities, setActivities] = useState<ToolActivity[]>([]);
 
@@ -88,8 +94,11 @@ export function useToolActivities() {
       try {
         const data = JSON.parse(new TextDecoder().decode(payload));
         if (!data.tool_used || !data.id) return;
+        const packetConversationId = data.conversation_id ?? conversationId;
+        if (conversationId && packetConversationId !== conversationId) return;
         const activity: ToolActivity = {
           id: data.id,
+          conversationId: packetConversationId ?? null,
           toolUsed: true,
           toolNames: data.tool_names ?? [],
           toolParams: data.tool_params ?? [],
@@ -115,7 +124,23 @@ export function useToolActivities() {
       room.off(RoomEvent.Disconnected, handleDisconnected);
       room.off(RoomEvent.Connected, handleConnected);
     };
-  }, [room]);
+  }, [conversationId, room]);
 
-  return activities;
+  // Retain completed rows across a hangup only for the same conversation. The
+  // render-time filter prevents even one frame of old activity appearing under
+  // a newly selected title; the effect then releases the hidden state.
+  const visibleActivities = useMemo(
+    () =>
+      activities.filter(
+        (activity) => !conversationId || activity.conversationId === conversationId
+      ),
+    [activities, conversationId]
+  );
+  useEffect(() => {
+    setActivities((current) =>
+      current.filter((activity) => !conversationId || activity.conversationId === conversationId)
+    );
+  }, [conversationId]);
+
+  return visibleActivities;
 }

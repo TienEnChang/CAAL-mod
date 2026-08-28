@@ -104,6 +104,7 @@ class ToolContext:
         self._n8n_base_url: str | None = None
         self._hass_tool_definitions: list[dict] = []
         self._hass_tool_callables: dict = {}
+        self._hass_tool_prefix = ""
         self._on_tool_status = on_tool_status
         self._on_usage = None
         self._llm_tools_cache: list[dict] | None = None
@@ -154,6 +155,7 @@ class ToolContext:
             hass_server = servers.get("home_assistant")
             if hass_server:
                 prefix = await detect_hass_tool_prefix(hass_server)
+                self._hass_tool_prefix = prefix
                 if prefix:
                     logger.info(f"Home Assistant MCP uses '{prefix}' prefix")
                 self._hass_tool_definitions, self._hass_tool_callables = (

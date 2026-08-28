@@ -5,7 +5,7 @@ Supports multiple LLM backends (Ollama, Groq) with unified tool calling.
 """
 
 from .caal_llm import CAALLLM
-from .llm_node import ToolDataCache, discover_tools, llm_node
+from .llm_node import ToolDataCache, discover_tools, llm_node, unbound_tool_names
 
 # Backward compatibility aliases
 from .ollama_llm import OllamaLLM
@@ -24,6 +24,7 @@ __all__ = [
     "llm_node",
     "ToolDataCache",
     "discover_tools",
+    "unbound_tool_names",
     "LLMProvider",
     "OllamaProvider",
     "GroqProvider",

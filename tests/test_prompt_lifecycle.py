@@ -1,10 +1,15 @@
 import asyncio
 
-from caal.llm.llm_node import discover_tools
+from caal.llm.llm_node import discover_tools, unbound_tool_names
 from caal.llm.providers import LLMResponse
 from caal.prompt_lifecycle import (
     build_session_context,
+    build_stable_prompt_bundle,
     compose_system_prompt,
+    load_stable_prompt_bundle,
+    require_prompt_prefix_ready,
+    save_stable_prompt_bundle,
+    toolset_fingerprint,
     warm_prompt_prefix,
 )
 
@@ -66,6 +71,28 @@ def test_prefix_warmup_uses_exact_tools_and_bounded_generation(monkeypatch):
     assert call["kwargs"]["temperature"] == 0
 
 
+def test_required_prefix_warmup_fails_the_preparation_stage(monkeypatch):
+    class FailingProvider:
+        async def chat(self, messages, tools=None, **kwargs):
+            raise RuntimeError("model unavailable")
+
+    monkeypatch.setenv("CAAL_PREFIX_WARM_TOKENS", "1")
+
+    try:
+        asyncio.run(
+            require_prompt_prefix_ready(
+                FailingProvider(),
+                stable_prompt="STABLE",
+                tools=[],
+                label="Startup stable prefix",
+            )
+        )
+    except RuntimeError as error:
+        assert str(error) == "Startup stable prefix warm-up did not complete"
+    else:
+        raise AssertionError("Required prefix failure must stop preparation")
+
+
 def test_tool_discovery_is_deduplicated_and_stably_ordered():
     duplicate = {"type": "function", "function": {"name": "z_tool"}}
     canonical = {
@@ -90,3 +117,76 @@ def test_tool_discovery_is_deduplicated_and_stably_ordered():
 
     assert [tool["function"]["name"] for tool in tools] == ["a_tool", "z_tool"]
     assert tools[1]["function"]["description"] == "canonical"
+
+
+def test_stable_bundle_round_trip_is_canonical_and_validated(tmp_path):
+    bundle = build_stable_prompt_bundle(
+        stable_prompt="SYSTEM",
+        tools=[
+            {"type": "function", "function": {"name": "z"}},
+            {"function": {"name": "a"}, "type": "function"},
+        ],
+        language="en",
+        model="model-id",
+        metadata={"n8n_workflow_name_map": {"a": "path"}},
+    )
+    path = tmp_path / "stable.json"
+    save_stable_prompt_bundle(bundle, path)
+
+    loaded = load_stable_prompt_bundle(
+        language="en",
+        model="model-id",
+        stable_prompt="SYSTEM",
+        path=path,
+    )
+
+    assert [tool["function"]["name"] for tool in loaded.tools] == ["a", "z"]
+    assert loaded.toolset_fingerprint == toolset_fingerprint(loaded.tools)
+    assert loaded.metadata["n8n_workflow_name_map"] == {"a": "path"}
+
+
+def test_stable_bundle_rejects_a_different_model(tmp_path):
+    bundle = build_stable_prompt_bundle(
+        stable_prompt="SYSTEM",
+        tools=[],
+        language="en",
+        model="old-model",
+    )
+    path = tmp_path / "stable.json"
+    save_stable_prompt_bundle(bundle, path)
+
+    try:
+        load_stable_prompt_bundle(
+            language="en",
+            model="new-model",
+            stable_prompt="SYSTEM",
+            path=path,
+        )
+    except RuntimeError as error:
+        assert "language/model" in str(error)
+    else:
+        raise AssertionError("Expected mismatched stable bundle to be rejected")
+
+
+def test_stable_tool_bindings_are_checked_without_rediscovery():
+    async def memory_short():
+        return None
+
+    agent = type(
+        "BoundAgent",
+        (),
+        {
+            "memory_short": staticmethod(memory_short),
+            "_hass_tool_callables": {},
+            "_n8n_workflow_name_map": {"calendar": "calendar-path"},
+            "_caal_mcp_servers": {"weather": object()},
+        },
+    )()
+    tools = [
+        {"type": "function", "function": {"name": "memory_short"}},
+        {"type": "function", "function": {"name": "calendar"}},
+        {"type": "function", "function": {"name": "weather__forecast"}},
+        {"type": "function", "function": {"name": "missing"}},
+    ]
+
+    assert unbound_tool_names(agent, tools) == ["missing"]

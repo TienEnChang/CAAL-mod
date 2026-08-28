@@ -357,3 +357,17 @@ def test_deleting_a_message_rejects_an_inflight_stale_summary(tmp_path):
         is False
     )
     assert store.get_summary(conversation_id) == (None, 0)
+
+
+def test_pending_transition_is_claimed_once(tmp_path):
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    transition = {
+        "conversation_id": store.ensure_active(),
+        "memory_trip": True,
+        "restart_first": False,
+    }
+
+    store.set_pending_transition(transition)
+
+    assert store.pop_pending_transition() == transition
+    assert store.pop_pending_transition() is None

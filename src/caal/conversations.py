@@ -151,6 +151,36 @@ class ConversationStore:
                 (conversation_id,),
             )
 
+    def set_pending_transition(self, transition: dict[str, Any]) -> None:
+        """Atomically publish cleanup/recovery work for the replacement job."""
+        payload = json.dumps(transition, ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO conversation_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("pending_transition", payload),
+            )
+
+    def pop_pending_transition(self) -> dict[str, Any] | None:
+        """Claim the most recent transition exactly once."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT value FROM conversation_state WHERE key = ?",
+                ("pending_transition",),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "DELETE FROM conversation_state WHERE key = ?",
+                ("pending_transition",),
+            )
+        try:
+            payload = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def rename(self, conversation_id: str, title: str) -> str:
         cleaned_title = title.strip()[:64]
         if not cleaned_title:

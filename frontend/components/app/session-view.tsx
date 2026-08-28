@@ -103,7 +103,7 @@ export const SessionView = ({
     deleteMessage,
     loading: conversationsLoading,
   } = useConversations();
-  const toolActivities = useToolActivities();
+  const toolActivities = useToolActivities(activeId);
   const [chatOpen, setChatOpen] = useState(true);
   const [microphoneEnabledPreference, setMicrophoneEnabledPreference] = useState(() =>
     getMicrophoneEnabledPreference()

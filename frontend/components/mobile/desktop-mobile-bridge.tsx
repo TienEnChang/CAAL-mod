@@ -35,7 +35,6 @@ export function DesktopMobileBridge() {
   const sessionCache = useSessionCache();
   const { messages } = useSessionMessages(session);
   const transcriptions = useTranscriptions({ room: session.room });
-  const toolActivities = useToolActivities();
   const {
     activeId,
     conversations,
@@ -46,6 +45,7 @@ export function DesktopMobileBridge() {
     renameConversation,
     selectConversation,
   } = useConversations();
+  const toolActivities = useToolActivities(activeId);
   const [clientId] = useState(() => crypto.randomUUID());
   const [controlResult, setControlResult] = useState<{
     commandId: string | null;

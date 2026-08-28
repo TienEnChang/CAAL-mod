@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["llm_node", "ToolDataCache", "discover_tools"]
+__all__ = ["llm_node", "ToolDataCache", "discover_tools", "unbound_tool_names"]
 
 
 class ToolDataCache:
@@ -551,6 +551,28 @@ async def discover_tools(agent, provider: LLMProvider | None = None) -> list[dic
     agent._llm_tools_cache = result
 
     return result
+
+
+def unbound_tool_names(agent, tools: list[dict] | None) -> list[str]:
+    """Return stable schemas for which this job has no execution binding."""
+    missing: list[str] = []
+    for tool in tools or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if not isinstance(name, str):
+            continue
+        if name in getattr(agent, "_hass_tool_callables", {}):
+            continue
+        if callable(getattr(agent, name, None)):
+            continue
+        if name in getattr(agent, "_n8n_workflow_name_map", {}):
+            continue
+        if "__" in name:
+            server_name, actual_name = name.split("__", 1)
+            if actual_name and server_name in getattr(agent, "_caal_mcp_servers", {}):
+                continue
+        missing.append(name)
+    return missing
 
 
 async def _get_mcp_tools(mcp_server) -> list[dict]:

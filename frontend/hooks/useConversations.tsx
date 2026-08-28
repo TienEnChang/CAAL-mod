@@ -61,23 +61,43 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const reconnectInFlightRef = useRef<Promise<void> | null>(null);
+  const activeIdRef = useRef<string | null>(null);
+  const listingRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+
+  const commitActiveId = useCallback((id: string) => {
+    if (activeIdRef.current !== id) {
+      activeIdRef.current = id;
+      // Invalidate an old detail response and remove its rows before React can
+      // render them beneath the newly selected conversation title.
+      detailRequestRef.current += 1;
+      setMessages([]);
+    }
+    setActiveId(id);
+  }, []);
 
   const loadDetail = useCallback(async (id: string) => {
+    const request = ++detailRequestRef.current;
     const detail = await responseJson<{ messages: PersistedMessage[] }>(
       await fetch(`/api/conversations/${encodeURIComponent(id)}`, { cache: 'no-store' })
     );
-    setMessages(detail.messages);
+    if (request === detailRequestRef.current && activeIdRef.current === id) {
+      setMessages(detail.messages);
+    }
   }, []);
 
   const refreshListing = useCallback(async () => {
+    const request = ++listingRequestRef.current;
     const listing = await responseJson<{
       active_id: string;
       conversations: ConversationSummary[];
     }>(await fetch('/api/conversations', { cache: 'no-store' }));
-    setConversations(listing.conversations);
-    setActiveId(listing.active_id);
+    if (request === listingRequestRef.current) {
+      setConversations(listing.conversations);
+      commitActiveId(listing.active_id);
+    }
     return listing.active_id;
-  }, []);
+  }, [commitActiveId]);
 
   const refresh = useCallback(async () => {
     try {
@@ -154,7 +174,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         }
 
         const selectedId = await action();
-        setActiveId(selectedId);
+        // Any listing request issued for the preceding conversation must not
+        // be allowed to restore its title or messages after this mutation.
+        listingRequestRef.current += 1;
+        commitActiveId(selectedId);
         await refresh();
         if (reconnect) {
           await startSessionWithMicrophonePreference(session);
@@ -170,7 +193,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         }
       }
     },
-    [refresh, session]
+    [commitActiveId, refresh, session]
   );
 
   useEffect(() => {

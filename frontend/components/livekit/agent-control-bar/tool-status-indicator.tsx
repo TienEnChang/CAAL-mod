@@ -4,6 +4,7 @@ import * as React from 'react';
 import { useTranslations } from 'next-intl';
 import { WrenchIcon } from '@phosphor-icons/react/dist/ssr';
 import { Tooltip } from '@/components/ui/tooltip';
+import { useConversations } from '@/hooks/useConversations';
 import { useToolStatus } from '@/hooks/useToolStatus';
 import { cn } from '@/lib/utils';
 
@@ -17,7 +18,8 @@ import { cn } from '@/lib/utils';
  */
 export function ToolStatusIndicator() {
   const t = useTranslations('Tools');
-  const toolStatus = useToolStatus();
+  const { activeId } = useConversations();
+  const toolStatus = useToolStatus(activeId);
   const [popupOpen, setPopupOpen] = React.useState(false);
   const containerRef = React.useRef<HTMLDivElement>(null);
 
