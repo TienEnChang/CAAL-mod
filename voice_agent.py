@@ -267,6 +267,16 @@ async def _warm_switched_model(model: str) -> bool:
             runtime.get("openai_model"),
         )
     await _build_stable_bundle(runtime, warm=True)
+
+    # Warming leaves its own working memory behind. A call would release that in
+    # teardown, but a switch has no teardown, so the drain runs here instead.
+    # It reallocates the batch small without touching the stable prefix the warm
+    # just created - that entry is the point of warming and must survive.
+    base_url = runtime.get("openai_base_url")
+    if base_url:
+        await asyncio.to_thread(
+            drain_local_model_batch, base_url, runtime["openai_model"]
+        )
     return True
 
 
