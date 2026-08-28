@@ -144,6 +144,31 @@ def _start_download(repo_id: str) -> str:
 _original_do_get = server.APIHandler.do_GET
 _original_do_post = server.APIHandler.do_POST
 _admin_lock = threading.Lock()
+_inflight = 0
+_inflight_idle = threading.Condition()
+_CLEAR_IDLE_TIMEOUT = float(os.getenv("CAAL_CLEAR_IDLE_TIMEOUT", "10"))
+
+
+def _await_generation_idle(timeout: float) -> bool:
+    """Block until no generation is running. False if it stayed busy."""
+    with _inflight_idle:
+        return _inflight_idle.wait_for(lambda: _inflight == 0, timeout=timeout)
+
+
+def _revive_generation_thread(response_generator) -> bool:
+    """Restart the generation loop if it has died. True if it had.
+
+    A dead loop is invisible from outside: the HTTP server keeps answering
+    /v1/models and /v1/memory while every completion queues to nobody and hangs
+    until the client times out. Reviving turns that silent stall into a
+    recoverable one.
+    """
+    thread = getattr(response_generator, "_generation_thread", None)
+    if thread is not None and thread.is_alive():
+        return False
+    logging.error("Generation thread was not running; restarting it")
+    _restart_generation_thread(response_generator)
+    return True
 
 for required_method in ("stop_and_join", "_generate"):
     if not hasattr(server.ResponseGenerator, required_method):
@@ -175,8 +200,21 @@ def _clear_after_generation_stops(response_generator, *, unload: bool) -> int:
                 f"ResponseGenerator.{required_attribute}"
             )
     with _admin_lock:
-        response_generator.stop_and_join()
         provider = response_generator.model_provider
+        if unload:
+            # Dropping the weights means the thread must go too: mlx-lm keeps
+            # the model bound in the generation loop's frame between requests,
+            # so it stays resident while that thread lives. The replacement
+            # loads its own copy, so nothing outlives its stream.
+            response_generator.stop_and_join()
+        elif not _await_generation_idle(_CLEAR_IDLE_TIMEOUT):
+            # Releasing under an active generation frees buffers it is still
+            # evaluating. Retaining one call's cache is the cheaper loss.
+            logging.warning(
+                "Generation still in flight; leaving the prompt cache in place"
+            )
+            return int(server.mx.get_active_memory())
+
         response_generator.prompt_cache.trim_to(n_sequences=0)
         response_generator._state_machine_cache.clear()
         if unload:
@@ -188,7 +226,8 @@ def _clear_after_generation_stops(response_generator, *, unload: bool) -> int:
             provider.draft_model = None
         server.mx.clear_cache()
         active_bytes = int(server.mx.get_active_memory())
-        _restart_generation_thread(response_generator)
+        if unload:
+            _restart_generation_thread(response_generator)
         return active_bytes
 
 
@@ -280,7 +319,16 @@ def _do_post(self) -> None:
         return
 
     if self.path != "/v1/cache/clear":
-        _original_do_post(self)
+        global _inflight
+        _revive_generation_thread(self.response_generator)
+        with _inflight_idle:
+            _inflight += 1
+        try:
+            _original_do_post(self)
+        finally:
+            with _inflight_idle:
+                _inflight -= 1
+                _inflight_idle.notify_all()
         return
 
     _clear_after_generation_stops(self.response_generator, unload=False)
