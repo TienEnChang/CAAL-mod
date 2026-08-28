@@ -53,6 +53,28 @@ A tool reload is a stable-prefix invalidation, not an in-call schema mutation:
 4. Future calls use the new fingerprint.
 5. An active call retains its frozen tool generation until it ends.
 
+### Model change
+
+Selecting a different model is a stable-prefix invalidation, and it is only
+permitted while idle:
+
+1. Refuse the change whenever a call is active. A live call has frozen its
+   session prefix and tool generation against the model it started on, and the
+   model server holds one model at a time, so a mid-call switch could only be
+   ignored or destructive. The refusal is a 409 and leaves settings untouched.
+2. Persist the selection. It is the single source of truth for which model
+   CAAL uses; the launcher starts the server on that same value so the server
+   default cannot become a competing identity.
+3. Rebuild the versioned stable prompt bundle for the new model identity. Tool
+   schemas are unchanged, but the bundle records the model it was built for.
+4. Load the new model and warm its stable prefix before reporting success.
+5. The next call therefore finds a valid bundle and a warm model, and performs
+   no discovery or warm-up of its own.
+
+Settings unrelated to the model remain writable during a call. If warming
+fails, the selection still stands: the next call rebuilds, which is slow rather
+than broken.
+
 ### Outgoing session
 
 When a user hangs up or switches conversations:

@@ -247,6 +247,29 @@ def _runtime_model_id(runtime: dict) -> str:
     )
 
 
+async def _warm_switched_model(model: str) -> bool:
+    """Load and warm a newly selected model so the next call starts ready.
+
+    Registered with the webhook server, which handles the settings save but
+    lives in the worker process and cannot reach the bundle builder directly.
+    Switching is refused during a call, so this only ever runs while idle.
+
+    Rebuilding the bundle here is what keeps tool discovery and prefix warming
+    out of call preparation: the bundle records the model it was built for, so
+    a switch invalidates it, and without this the next call would rediscover
+    tools and warm the prefix while the caller waited.
+    """
+    runtime = get_runtime_settings()
+    if runtime.get("openai_model") != model:
+        logger.warning(
+            "Warm-up asked for %s but settings now say %s; using settings",
+            model,
+            runtime.get("openai_model"),
+        )
+    await _build_stable_bundle(runtime, warm=True)
+    return True
+
+
 async def _build_stable_bundle(
     runtime: dict,
     *,
@@ -1579,7 +1602,11 @@ def run_webhook_server_sync():
     """
     import uvicorn
 
-    from caal.webhooks import app
+    from caal.webhooks import app, set_model_change_handler
+
+    # Registered here rather than at import time: the webhook server owns the
+    # settings save, but the bundle builder lives with the job code.
+    set_model_change_handler(_warm_switched_model)
 
     config = uvicorn.Config(
         app,

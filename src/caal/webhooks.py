@@ -44,7 +44,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from livekit.protocol.models import DataPacket
-from livekit.protocol.room import SendDataRequest
+from collections.abc import Awaitable, Callable
+
+from livekit.protocol.room import ListRoomsRequest, SendDataRequest
 from pydantic import BaseModel
 
 from . import registry_cache
@@ -78,6 +80,42 @@ def get_livekit_api() -> api.LiveKitAPI:
         api_key=os.getenv("LIVEKIT_API_KEY", "devkey"),
         api_secret=os.getenv("LIVEKIT_API_SECRET", "secret"),
     )
+
+
+# Switching models is only safe between calls. A live call has already frozen
+# its session prefix and tool generation against the model it started on, and
+# the model server holds one model at a time - so honouring a switch mid-call
+# would either be ignored until the call ended or would pull the model out from
+# under an in-flight turn. The agent job registers the handler that loads and
+# warms the new model, because the bundle builder lives with the job code while
+# this server runs in the worker process.
+_MODEL_CHANGE_HANDLER: Callable[[str], Awaitable[bool]] | None = None
+
+
+def set_model_change_handler(handler: Callable[[str], Awaitable[bool]] | None) -> None:
+    """Register the callable that loads and warms a newly selected model."""
+    global _MODEL_CHANGE_HANDLER
+    _MODEL_CHANGE_HANDLER = handler
+
+
+async def call_is_active(room_name: str = "voice_assistant_room") -> bool:
+    """Report whether anyone is currently on a call.
+
+    A failure to reach LiveKit is reported as "no call". The alternative -
+    refusing every model change whenever LiveKit is unreachable - would make the
+    setting unusable exactly when the service is already degraded.
+    """
+    lk = None
+    try:
+        lk = get_livekit_api()
+        rooms = await lk.room.list_rooms(ListRoomsRequest(names=[room_name]))
+        return any(room.num_participants > 0 for room in rooms.rooms)
+    except Exception as error:
+        logger.warning("Could not determine whether a call is active: %s", error)
+        return False
+    finally:
+        if lk:
+            await lk.aclose()
 
 
 async def send_agent_command(room_name: str, command: dict) -> tuple[bool, str | None]:
@@ -556,6 +594,19 @@ async def update_settings(req: SettingsUpdateRequest) -> SettingsResponse:
             if not is_valid:
                 raise HTTPException(status_code=400, detail=f"Invalid {field}: {error}")
 
+    # A model change is only safe between calls, and it must leave the new model
+    # loaded and warm rather than making the next caller wait for it.
+    requested_model = req.settings.get("openai_model")
+    model_changed = bool(
+        requested_model and requested_model != current.get("openai_model")
+    )
+    if model_changed and await call_is_active():
+        raise HTTPException(
+            status_code=409,
+            detail="End the call before switching models. The active call is "
+            "frozen against the model it started on.",
+        )
+
     # Merge with new settings (only known keys)
     for key, value in req.settings.items():
         if key in settings_module.DEFAULT_SETTINGS:
@@ -569,6 +620,29 @@ async def update_settings(req: SettingsUpdateRequest) -> SettingsResponse:
 
     # Reload and return
     settings = settings_module.reload_settings()
+
+    if model_changed:
+        # The stable bundle records the model it was built for, so a change
+        # invalidates it. Rebuilding here - while idle - keeps tool discovery
+        # and prefix warming out of the next call's preparation, where the
+        # specification forbids them.
+        if _MODEL_CHANGE_HANDLER is None:
+            logger.warning(
+                "Model changed to %s but no warm-up handler is registered; "
+                "the next call will rebuild the stable bundle itself",
+                requested_model,
+            )
+        else:
+            try:
+                warmed = await _MODEL_CHANGE_HANDLER(requested_model)
+                logger.info(
+                    "Model switched to %s; stable prefix %s",
+                    requested_model,
+                    "warm" if warmed else "not warmed",
+                )
+            except Exception as error:
+                # A cold model is slow, not broken: the next call rebuilds.
+                logger.error("Could not warm %s after switch: %s", requested_model, error)
     language = settings.get("language", "en")
     prompt_content = settings_module.load_prompt_content(language=language)
     custom_exists = settings_module.custom_prompt_exists()
