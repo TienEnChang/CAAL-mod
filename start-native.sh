@@ -92,6 +92,14 @@ MODEL_ID="$(settings_model || true)"
 MODEL_ID="${MODEL_ID:-${CAAL_MODEL_ID:-mlx-community/Qwen3-4B-Instruct-2507-4bit}}"
 MODEL_PORT="${CAAL_MODEL_PORT:-8100}"
 # Held below the 11.84 GiB mlx-lm would otherwise wire on a 16 GiB machine.
+# mlx-lm keeps up to ten distinct KV caches by default with no size ceiling.
+# Each one holds the whole prompt - system instructions, every tool schema, and
+# the history - so a call accumulates roughly 0.33 GiB per assistant turn, and
+# nine of those ten are superseded versions of the same conversation that will
+# never be reused. Two is what CAAL actually needs: the warmed stable prefix and
+# the live conversation branch. The byte ceiling bounds a long call.
+MODEL_PROMPT_CACHE_SIZE="${CAAL_MODEL_PROMPT_CACHE_SIZE:-2}"
+MODEL_PROMPT_CACHE_BYTES="${CAAL_MODEL_PROMPT_CACHE_BYTES:-2GB}"
 MODEL_WIRED_LIMIT_GB="${CAAL_MODEL_WIRED_LIMIT_GB:-6}"
 MODEL_MEMORY_LIMIT_GB="${CAAL_MODEL_MEMORY_LIMIT_GB:-10}"
 MODEL_PARALLEL="${CAAL_MODEL_PARALLEL:-4}"
@@ -160,6 +168,8 @@ Port overrides:
   CAAL_MODEL_PORT             OpenAI-compatible model API ($MODEL_PORT)
   CAAL_MODEL_WIRED_LIMIT_GB   Wired-memory cap ($MODEL_WIRED_LIMIT_GB)
   CAAL_MODEL_MEMORY_LIMIT_GB  Allocation cap ($MODEL_MEMORY_LIMIT_GB)
+  CAAL_MODEL_PROMPT_CACHE_SIZE  Retained KV caches ($MODEL_PROMPT_CACHE_SIZE)
+  CAAL_MODEL_PROMPT_CACHE_BYTES KV cache ceiling ($MODEL_PROMPT_CACHE_BYTES)
   CAAL_MODEL_PARALLEL         Prompt/decode concurrency ($MODEL_PARALLEL)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
   CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
@@ -790,7 +800,9 @@ start_named() {
         --model "$MODEL_ID" \
         --host 127.0.0.1 --port "$MODEL_PORT" \
         --prompt-concurrency "$MODEL_PARALLEL" \
-        --decode-concurrency "$MODEL_PARALLEL"
+        --decode-concurrency "$MODEL_PARALLEL" \
+        --prompt-cache-size "$MODEL_PROMPT_CACHE_SIZE" \
+        --prompt-cache-bytes "$MODEL_PROMPT_CACHE_BYTES"
       ;;
     speech)
       echo "Starting MLX Whisper + MLX Kokoro → http://127.0.0.1:$SPEECH_PORT"
