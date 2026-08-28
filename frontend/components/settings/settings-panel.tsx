@@ -466,6 +466,30 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     }
   }, [settings.openai_base_url, settings.openai_api_key, settings.openai_model, t]);
 
+  // Populate the model list as soon as the panel opens. The list is the local
+  // server's /v1/models, so switching models is picking one here and saving:
+  // the next call reads the saved value and the server loads it on demand.
+  useEffect(() => {
+    if (
+      isOpen &&
+      settings.llm_provider === 'openai_compatible' &&
+      settings.openai_base_url &&
+      openaiModels.length === 0 &&
+      openaiTest.status !== 'testing' &&
+      !loading
+    ) {
+      testOpenAICompatible();
+    }
+  }, [
+    isOpen,
+    settings.llm_provider,
+    settings.openai_base_url,
+    openaiModels.length,
+    openaiTest.status,
+    loading,
+    testOpenAICompatible,
+  ]);
+
   const testOpenRouter = useCallback(async () => {
     if (!settings.openrouter_api_key) return;
     setOpenrouterTest({ status: 'testing', error: null });

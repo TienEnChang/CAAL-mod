@@ -1,27 +1,25 @@
-"""End a chat session before the active LM Studio model exhausts the Mac.
+"""End a chat session before the active model exhausts the Mac.
 
 The guard has two signals with different meanings:
 
-* The LM Studio runtime's physical footprint is backend-local and leads system
-  pressure. At the configured limit the session ends normally, ordinary request
-  teardown releases the transient allocations, and the model is reloaded only
-  if that teardown fails to bring the footprint back down.
+* MLX active allocation is the primary backend-local signal. At the configured
+  limit the session ends normally, ordinary request teardown releases transient
+  allocations, and the model process restarts only if recovery fails. Process
+  footprint supplies a fallback when MLX metrics are unavailable.
 * macOS critical memory pressure is a system-wide emergency. The model is
   reloaded before the session is replaced so the reconnect procedure has enough
   memory to complete.
 
-LM Studio publishes no allocation counter of its own: its REST API reports a
-loaded instance's context configuration and its catalog reports the model's
-static file size, neither of which tracks live memory. The footprint of the
-llmster inference tree is therefore read from macOS itself, which keeps the
-first signal accurate for any model or quantization LM Studio can serve. The
-daemon tree is shared, so other simultaneously loaded LM Studio models also
-contribute to this measurement.
+The CAAL-owned server publishes MLX allocation counters at ``GET /v1/memory``.
+Its physical footprint is read from macOS when those counters are unavailable.
 
 macOS pressure is observed with ``DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`` and
 ``kern.memorystatus_vm_pressure_level``. The dispatch source reports only
 transitions, so it reads as unknown until the first one arrives; the sysctl is
 pollable and supplies the level in the meantime.
+
+Urgent pressure is diagnostic state only. Only critical pressure trips the
+guard and requests restart-first recovery.
 """
 
 from __future__ import annotations
@@ -38,13 +36,15 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
+from .model_cache import read_local_model_memory
+
 logger = logging.getLogger(__name__)
 
 GIB = 1024**3
 
-# The LM Studio daemon. Its inference workers are ordinary node executables, so
-# they are found by walking the process tree rather than by name.
-LMSTUDIO_DAEMON_COMM = "llmster"
+# CAAL's model server is an ordinary python process, so it is identified by
+# the script it runs rather than by its executable name.
+MODEL_SERVER_SCRIPT = "mlx_model_server.py"
 
 __all__ = [
     "MemoryGuardConfig",
@@ -79,17 +79,29 @@ class MemoryReading:
 
     model_footprint_bytes: int | None = None
     pressure: PressureLevel | None = None
+    model_active_bytes: int | None = None
 
     @property
     def measured(self) -> bool:
-        return self.model_footprint_bytes is not None or self.pressure is not None
+        return (
+            self.model_footprint_bytes is not None
+            or self.model_active_bytes is not None
+            or self.pressure is not None
+        )
 
 
 @dataclass(frozen=True)
 class MemoryGuardConfig:
     enabled: bool = True
+    # One ceiling, 8 GiB, whichever signal is readable. MLX's active allocation
+    # is the primary reading; the macOS footprint is only consulted when the
+    # model server cannot be reached. Holding both at the same number means the
+    # call ends at the same point either way, rather than the guard becoming
+    # stricter or looser depending on which signal happened to be available.
     max_model_bytes: int = 8 * GIB
     recovery_model_bytes: int = 6 * GIB
+    max_active_bytes: int = 8 * GIB
+    recovery_active_bytes: int = int(4.5 * GIB)
     interval_seconds: float = 2.0
     consecutive_readings: int = 2
     recovery_timeout_seconds: float = 20.0
@@ -116,6 +128,10 @@ class MemoryGuardConfig:
             enabled=enabled,
             max_model_bytes=int(_num("CAAL_MODEL_MEMORY_TRIP_GB", 8) * GIB),
             recovery_model_bytes=int(_num("CAAL_MODEL_MEMORY_RECOVERY_GB", 6) * GIB),
+            max_active_bytes=int(_num("CAAL_MODEL_ALLOCATION_TRIP_GB", 8) * GIB),
+            recovery_active_bytes=int(
+                _num("CAAL_MODEL_ALLOCATION_RECOVERY_GB", 4.5) * GIB
+            ),
             interval_seconds=_num("CAAL_MEMORY_CHECK_SECONDS", 2),
             consecutive_readings=int(_num("CAAL_MEMORY_TIGHT_READINGS", 2)),
             recovery_timeout_seconds=_num("CAAL_MEMORY_RECOVERY_TIMEOUT", 20),
@@ -230,11 +246,16 @@ def _sysctl_pressure_level() -> PressureLevel | None:
     return None
 
 
-def _process_tree(root_comm: str) -> list[int]:
-    """Return the pids of every ``root_comm`` process and its descendants."""
+def _model_server_pids() -> list[int]:
+    """Return the pids serving CAAL's model.
+
+    Matching on the script path rather than a bare "python" keeps unrelated
+    interpreters - the agent, the speech bridge, this process - out of the
+    model lane, while still finding the server wherever its venv lives.
+    """
     try:
         listing = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,ppid=,comm="],
+            ["/bin/ps", "-axo", "pid=,command="],
             capture_output=True,
             text=True,
             timeout=5,
@@ -245,40 +266,31 @@ def _process_tree(root_comm: str) -> list[int]:
     if listing.returncode != 0:
         return []
 
-    children: dict[int, list[int]] = {}
-    roots: list[int] = []
+    pids: list[int] = []
     for line in listing.stdout.splitlines():
-        parts = line.split(maxsplit=2)
+        parts = line.split()
         if len(parts) < 3:
             continue
+        # An interpreter running the script, not any process whose arguments
+        # happen to name it: a shell tailing the log must not be counted as the
+        # model. Requiring both the python executable and the script as its own
+        # argument is what separates the two.
+        if not os.path.basename(parts[1]).startswith("python"):
+            continue
+        if not any(os.path.basename(arg) == MODEL_SERVER_SCRIPT for arg in parts[2:]):
+            continue
         try:
-            pid, ppid = int(parts[0]), int(parts[1])
+            pids.append(int(parts[0]))
         except ValueError:
             continue
-        children.setdefault(ppid, []).append(pid)
-        # Match the executable, never the whole command line: an unrelated
-        # process whose arguments merely mention LM Studio is not LM Studio.
-        if os.path.basename(parts[2]) == root_comm:
-            roots.append(pid)
-
-    tree: list[int] = []
-    seen: set[int] = set()
-    pending = list(roots)
-    while pending:
-        pid = pending.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        tree.append(pid)
-        pending.extend(children.get(pid, []))
-    return tree
+    return pids
 
 
 def _model_footprint_bytes() -> int | None:
-    """Sum the physical footprint of the LM Studio inference tree."""
+    """Sum the physical footprint of CAAL's model server."""
     if sys.platform != "darwin":
         return None
-    pids = _process_tree(LMSTUDIO_DAEMON_COMM)
+    pids = _model_server_pids()
     if not pids:
         return None
 
@@ -310,7 +322,7 @@ def _model_footprint_bytes() -> int | None:
         report.unlink(missing_ok=True)
 
 
-def read_memory() -> MemoryReading:
+def read_memory(model_base_url: str | None = None) -> MemoryReading:
     """Sample the model footprint and macOS pressure state. Never raises."""
     # NORMAL is zero, so an unreadable level must be distinguished explicitly
     # rather than by truthiness; treating it as missing would leave the guard
@@ -318,10 +330,25 @@ def read_memory() -> MemoryReading:
     pressure = _sysctl_pressure_level()
     if pressure is None:
         pressure = _PRESSURE_SOURCE.current()
+    active_bytes = None
+    if model_base_url:
+        payload = read_local_model_memory(model_base_url)
+        if payload is not None:
+            try:
+                active_bytes = int(payload["active_bytes"])
+            except (KeyError, TypeError, ValueError):
+                pass
     return MemoryReading(
-        model_footprint_bytes=_model_footprint_bytes(),
+        model_footprint_bytes=(
+            _model_footprint_bytes() if active_bytes is None else None
+        ),
         pressure=pressure,
+        model_active_bytes=active_bytes,
     )
+
+
+def _read_for_endpoint(model_base_url: str | None) -> MemoryReading:
+    return read_memory(model_base_url) if model_base_url else read_memory()
 
 
 def evaluate(reading: MemoryReading, config: MemoryGuardConfig) -> MemoryTrip | None:
@@ -333,26 +360,45 @@ def evaluate(reading: MemoryReading, config: MemoryGuardConfig) -> MemoryTrip | 
         )
 
     if (
-        reading.model_footprint_bytes is not None
+        reading.model_active_bytes is not None
+        and reading.model_active_bytes >= config.max_active_bytes
+    ):
+        return MemoryTrip(
+            f"MLX is actively holding {reading.model_active_bytes / GIB:.2f} GiB "
+            f"(limit {config.max_active_bytes / GIB:.2f} GiB)"
+        )
+
+    if (
+        reading.model_active_bytes is None
+        and reading.model_footprint_bytes is not None
         and reading.model_footprint_bytes >= config.max_model_bytes
     ):
         return MemoryTrip(
-            f"LM Studio is holding {reading.model_footprint_bytes / GIB:.2f} GiB "
+            f"The model is holding {reading.model_footprint_bytes / GIB:.2f} GiB "
             f"(limit {config.max_model_bytes / GIB:.2f} GiB)"
         )
 
     return None
 
 
-async def wait_for_recovery(config: MemoryGuardConfig) -> bool:
+async def wait_for_recovery(
+    config: MemoryGuardConfig,
+    model_base_url: str | None = None,
+) -> bool:
     """Wait until request teardown demonstrably reduced the model footprint."""
     deadline = asyncio.get_running_loop().time() + config.recovery_timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
-        reading = await asyncio.to_thread(read_memory)
+        reading = await asyncio.to_thread(_read_for_endpoint, model_base_url)
         if reading.pressure == PressureLevel.CRITICAL:
             return False
         if (
-            reading.model_footprint_bytes is not None
+            reading.model_active_bytes is not None
+            and reading.model_active_bytes < config.recovery_active_bytes
+        ):
+            return True
+        if (
+            reading.model_active_bytes is None
+            and reading.model_footprint_bytes is not None
             and reading.model_footprint_bytes < config.recovery_model_bytes
         ):
             return True
@@ -363,6 +409,7 @@ async def wait_for_recovery(config: MemoryGuardConfig) -> bool:
 async def guard_loop(
     on_trip,
     config: MemoryGuardConfig | None = None,
+    model_base_url: str | None = None,
 ) -> None:
     """Poll the two signals and invoke ``on_trip`` once."""
     config = config or MemoryGuardConfig.from_env()
@@ -370,14 +417,14 @@ async def guard_loop(
         logger.info("Memory guard disabled")
         return
 
-    probe = await asyncio.to_thread(read_memory)
+    probe = await asyncio.to_thread(_read_for_endpoint, model_base_url)
     if not probe.measured:
         logger.info("Memory guard inactive (no readable memory signals)")
         return
 
     logger.info(
-        "Memory guard active (model<%.1f GiB, critical OS pressure, every %.1fs)",
-        config.max_model_bytes / GIB,
+        "Memory guard active (MLX<%.1f GiB, critical OS pressure, every %.1fs)",
+        config.max_active_bytes / GIB,
         config.interval_seconds,
     )
 
@@ -385,7 +432,7 @@ async def guard_loop(
     consecutive = 0
     while True:
         await asyncio.sleep(config.interval_seconds)
-        reading = await asyncio.to_thread(read_memory)
+        reading = await asyncio.to_thread(_read_for_endpoint, model_base_url)
         trip = evaluate(reading, config)
         if trip is None:
             previous = None

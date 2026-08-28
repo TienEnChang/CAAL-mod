@@ -33,7 +33,7 @@
   "min_endpointing_delay": 0.5,
   "openai_api_key": "not-needed",
   "openai_base_url": "http://127.0.0.1:8100/v1",
-  "openai_model": "caal-model",
+  "openai_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
   "openrouter_api_key": "",
   "openrouter_model": ""
 }

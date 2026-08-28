@@ -167,9 +167,10 @@ def _get_runtime_settings() -> dict:
         "openai_api_key": (
             settings.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
         ),
+        # The saved choice wins over the launcher's default, so that switching
+        # models in the UI takes effect here exactly as it does for voice.
         "openai_model": (
-            os.getenv("CAAL_LMSTUDIO_INSTANCE_ID")
-            or user_settings.get("openai_model")
+            user_settings.get("openai_model")
             or os.getenv("OPENAI_MODEL", "")
         ),
         # OpenRouter

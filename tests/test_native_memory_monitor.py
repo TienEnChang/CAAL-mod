@@ -52,35 +52,27 @@ def test_bad_swapusage_is_rejected() -> None:
         monitor.parse_swapusage("unavailable")
 
 
-def test_executable_pids_ignore_matching_command_lines(monkeypatch) -> None:
-    """A process that merely mentions llmster is not part of the model lane."""
-    listing = "\n".join(
-        [
-            "    1 /sbin/launchd",
-            "25432 llmster",
-            "25438 /Users/me/.lmstudio/.internal/utils/node",
-            "59525 /bin/zsh",  # was matched by the previous command-line search
-            "60001 llmsterctl",
-        ]
-    )
-    monkeypatch.setattr(monitor, "_run", lambda *args, **kwargs: listing)
+def test_model_lane_tracks_caals_own_server(monkeypatch, tmp_path: Path) -> None:
+    """The model lane is one supervised process now, not a foreign daemon tree.
 
-    assert monitor._executable_pids("llmster") == [25432]
-
-
-def test_llmster_children_join_the_model_lane(monkeypatch, tmp_path: Path) -> None:
+    Serving through mlx-lm in CAAL's own process means the footprint measures
+    only CAAL's model. Under LM Studio the llmster tree had to be walked, and
+    any other model loaded in that runtime was counted here too.
+    """
     pid_dir = tmp_path / ".native" / "pids"
     pid_dir.mkdir(parents=True)
     (pid_dir / "model.pid").write_text("46349")
     processes = {
-        46349: {"ppid": 1, "rss_bytes": 20, "command": "python lmstudio_model_server.py"},
+        46349: {
+            "ppid": 1,
+            "rss_bytes": 4000,
+            "command": "python /app/scripts/mlx_model_server.py --port 8100",
+        },
         25432: {"ppid": 1, "rss_bytes": 300, "command": "llmster"},
-        46380: {"ppid": 25432, "rss_bytes": 4000, "command": "node -e ..."},
-        59525: {"ppid": 1, "rss_bytes": 7, "command": "zsh -c grep llmster"},
+        59525: {"ppid": 1, "rss_bytes": 7, "command": "zsh -c grep mlx_model_server.py"},
     }
-    monkeypatch.setattr(monitor, "_executable_pids", lambda comm: [25432])
 
     _, services = monitor._service_processes(tmp_path, processes)
 
-    assert services["model"]["pids"] == [25432, 46349, 46380]
-    assert services["model"]["rss_bytes"] == 4320
+    assert services["model"]["pids"] == [46349]
+    assert services["model"]["rss_bytes"] == 4000

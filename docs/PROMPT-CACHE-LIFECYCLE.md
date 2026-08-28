@@ -1,139 +1,162 @@
-# CAAL Memory and Conversation Lifecycle
+# CAAL Memory, Prompt, and Conversation Lifecycle
 
-This document defines how CAAL prepares model memory, carries conversation meaning across calls, and recovers memory when a session ends. The design has four core operations mapped onto six user-visible stages:
+This document defines the steady-state lifecycle. The implementation checklist
+for the pre-next-call revision is in `PRE-NEXT-CALL-REVISION.md`.
+
+CAAL has six user-visible stages implemented by four shared operations:
 
 ```text
-initialize model/runtime       Stage 1
-prepare a call                 Stages 2 and 4
-process a user turn            Stages 3 and 5
-end, recover, summarize,
-and restore stable prefix      Stage 6
+initialize service foundation                 Stage 1
+prepare and warm a frozen call                Stages 2 and 4
+process a live turn                           Stages 3 and 5
+stop allocation and hand off durable state    Stage 6
 ```
 
-Stages 2 and 4 must use the same preparation path. Stages 3 and 5 must use the same turn-processing path. The stage numbers describe when an operation occurs, not separate implementations.
+Stages 2 and 4 use one preparation path. Stages 3 and 5 use one turn path.
 
 ## Lifecycle
 
 | Stage | General principle | Memory occupants |
 | --- | --- | --- |
-| **1. Service startup -> ready for call** | Load expensive shared components once and perform representative inference before declaring readiness. Build the stable prompt prefix. Nothing call-specific should remain active. | Qwen model parameters; LM Studio/MLX runtime; compiled kernels and execution plans; allocator pools and reusable model buffers; STT and TTS model parameters; stable prefix containing system instructions and tool definitions. |
-| **2. First call starts -> before greeting ends** | Run the shared call-preparation path. Use the greeting interval to assemble and prefill a fresh session prefix. Cancel preparation if the call ends, but not merely because the user interrupts the greeting. Record cache readiness as system activity outside model-visible history. | Stable prefix; session date/time; current user memory; existing summary and bounded recent tail when present; session-prefix KV/cache state; greeting audio and playback buffers. |
-| **3. First user turn** | Run the shared turn-processing path. If greeting-time prefill is unfinished, await that same request before starting real inference so active Qwen concurrency remains one. Then allocate only the active STT -> Qwen/tools -> TTS working set and release each temporary component when it is no longer needed. After completed assistant turns, checkpoint only when the unsummarized transcript crosses the rolling threshold. | Captured and resampled audio; mel features and STT activations; current prompt; turn KV cache and Qwen activations; generated tokens and tool intermediates; TTS chunks, assembled audio, encoded WAV, and playback buffers. A threshold-triggered summary temporarily uses the same serialized inference slot. |
-| **4. Follow-up call starts -> before greeting ends** | Run the same call-preparation path as Stage 2, including readiness reporting and barge-in behavior. Load the selected conversation's durable state after the previous transition has completed. A graceful transition leaves the model warm; a hard reset may make this stage physically as cold as Stage 2. | The same categories as Stage 2, using the current user memory and the selected conversation's latest valid summary and bounded tail. No active KV, audio, or tool state from the previous call may cross the boundary. |
-| **5. Follow-up user turn** | Run exactly the same turn-processing and rolling-summary path as Stage 3, including awaiting unfinished prefix preparation. Continuity comes from the reconstructed session prefix, not retained inference state. | The same categories as Stage 3, built on the follow-up call's session prefix and current-call turns. |
-| **6. Session breakdown** | Stop new turns, reclaim call-scoped memory through one of two transition modes, persist semantic state, summarize after clearance, and then explicitly rehydrate the stable prefix before reconnecting, switching, or remaining idle. | Release active KV and Qwen activations; STT/TTS/audio buffers; pending tool state; call-local prompt objects and session state. Preserve the transcript and summary checkpoint. Preserve model/runtime memory after a graceful transition; rebuild it after a hard reset. After the bounded summary request, warm the stable prefix containing the exact system instructions and tool definitions. |
+| **1. Service startup -> ready for call** | Load shared model, speech, and runtime components. Discover canonical model-visible tool schemas once, publish a versioned stable prompt bundle, and warm that exact stable prefix before declaring readiness. | Model parameters; `mlx-lm` runtime and kernels; allocator pools; STT/TTS parameters; stable system instructions and exact tool definitions. |
+| **2. First call starts -> before greeting ends** | Before greeting, including the first call after service startup or restart, complete transition recovery and summarize the selected conversation whenever it has an eligible unsummarized delta. Then load user memory/date/history, read the stable bundle, bind matching tool handlers, and freeze the session. During greeting, perform only the exact frozen session-prefix prefill. | Stable bundle; finalized summary and bounded tail; user memory; date/time; session-prefix KV; greeting audio. |
+| **3. First user turn** | Await the greeting-time prefill if unfinished, then use the same single inference slot for LLM/tools/TTS. Run rolling summaries only at the configured completed-turn threshold. | STT samples/features; frozen prompt plus current turn; active KV/activations; tool intermediates; TTS and playback buffers. |
+| **4. Follow-up call starts -> before greeting ends** | Use exactly the Stage 2 path for the selected conversation. A hard reset may make model readiness colder, but no previous call-scoped state crosses the boundary. | The same categories as Stage 2 for the selected conversation and stable tool generation. |
+| **5. Follow-up user turn** | Use exactly the Stage 3 path. Continuity comes from durable summary/history reconstructed into the frozen session, not retained turn state. | The same categories as Stage 3. |
+| **6. Session breakdown** | Gate new turns, persist completed messages, close the session, publish a durable transition, and immediately clear call-scoped model/speech caches in bounded non-inference shutdown cleanup. Delete the fixed room promptly. Summary and prefix inference do not run in the outgoing job. | Release session KV, speech activations, allocator cache, and job-local inference/audio/tool objects. Preserve transcript, summary checkpoint, model parameters, and speech parameters after graceful teardown; rebuild model/runtime after hard reset. |
 
-## Memory Boundaries
+Only session-prefix cache loading may overlap a greeting. Recovery, model
+loading, summarization, tool discovery, tool binding, and session construction
+finish before greeting playback begins.
 
-CAAL must keep four kinds of state separate:
+## State and Cache Boundaries
 
 | State | Lifetime | Rule |
 | --- | --- | --- |
-| **Model/runtime foundation** | Service lifetime | Qwen parameters and the LM Studio/MLX runtime, kernels, execution plans, allocator pools, and reusable buffers load in Stage 1. Keep them across graceful transitions. Rebuild them only after a hard reset, LM Studio restart, or explicit model change. |
-| **Stable prefix cache** | Until invalidated or evicted | Cached inference state for the exact system instructions and tool definitions. Create it in Stage 1 and explicitly rehydrate it in Stage 6 after summarization. A graceful transition may retain it, but CAAL must not assume that it survived teardown or the summary request. A hard reset always erases it. |
-| **Call and turn inference state** | One call or one turn | Session and turn KV caches, activations, speech buffers, tool intermediates, and call-local objects must not cross a call boundary. |
-| **Durable conversation state** | Across calls and process/model restarts | Conversation meaning lives in persistent history, summary, and checkpoint data. It must never depend on an LM Studio cache hit. |
+| **Model/runtime foundation** | Service lifetime | Keep parameters, `mlx-lm`, kernels, and reusable buffers across graceful transitions. Rebuild after a model-server restart or explicit model change. |
+| **Stable prompt bundle** | Until explicit invalidation | Stable system instructions, canonical tool schemas, language/model identity, metadata required for execution binding, and toolset fingerprint. Discover at Stage 1 or explicit reload—not ordinary calls. |
+| **Stable prefix cache** | Until evicted/reset | Best-effort model cache for the exact stable bundle. Correctness never depends on a hit. Session prefill naturally recreates it after a miss. |
+| **Session prefix** | One call | Stable bundle plus frozen date/time, user memory, finalized summary, and bounded tail. Build once before greeting; prefill during greeting. |
+| **Turn state** | One turn | Current message, KV growth, activations, tool results, STT/TTS buffers. Release promptly. |
+| **Durable conversation state** | Across all calls/resets | Full transcript, last valid summary, `summary_through_rowid`, and complete messages after that checkpoint. |
 
-LM Studio prompt caching is only a performance optimization. CAAL must remain correct when any prefix cache misses or is erased.
+## Stable Tools
 
-## Ending a Session
+Service startup canonicalizes, sorts, deduplicates, fingerprints, persists, and
+warms the model-visible schemas. Tool execution clients are separate. Each job
+may open MCP connections and bind handlers, but it must verify that every
+stable schema has a matching callable without rediscovering schemas.
 
-There are exactly two transition behaviors.
+An explicit tool reload creates a future stable generation:
 
 ```text
-                         +-> recovery succeeds -+
-graceful teardown -------+                       |
-                         +-> recovery fails -----+-> hard reset -+
-                                                                  |
-critical pressure -----------------------------> hard reset ------+
-                                                                  |
-                                      clearance/readiness succeeds
-                                                                  |
-                                            summarize durable delta
-                                                                  |
-                                           rehydrate stable prefix
-                                                                  |
-                                       reconnect, switch, or go idle
+discover new schemas
+  -> canonicalize and fingerprint
+  -> atomically replace stable bundle
+  -> warm new stable prefix
+  -> future calls use it
 ```
 
-### Graceful transition
+The active call retains its frozen generation. It does not mutate schemas or
+execution maps mid-call.
 
-A manual ending, ordinary session switch, or normal model-footprint guard trip starts here:
+## Ending and Replacing a Session
 
-1. Refuse new turns and new call-scoped allocations.
-2. Finish or cancel active inference.
-3. Persist all completed conversation messages.
-4. Close the call and release Qwen turn state, STT/TTS state, audio, tool intermediates, and call-local objects.
-5. For a memory-guard-triggered ending, verify that normal teardown reclaimed the required memory.
-6. Preserve the model/runtime foundation. The stable prefix cache may survive, but do not rely on it.
-7. If recovery fails, continue with the hard-reset procedure; otherwise continue to post-clearance summarization.
+There are exactly two memory-transition behaviors. Failed graceful recovery
+escalates into hard reset; it is not a third behavior.
+
+### Graceful behavior
+
+Manual endings, conversation switches, and the MLX allocation boundary use
+this behavior:
+
+1. Refuse new turns.
+2. Finish or cancel active inference and persist completed messages.
+3. Close the AgentSession and publish a durable pending transition.
+4. Let the outgoing shutdown callback cancel job-local tasks, clear local
+   model/speech call caches, and close clients; it performs no model inference.
+5. Delete the fixed LiveKit room promptly. Participant count is not a
+   maintenance-completion signal because LiveKit disconnects the room before it
+   awaits shutdown callbacks.
+6. The replacement job repeats the idempotent prompt/speech cache clear as a
+   fallback in case room deletion interrupted outgoing cleanup and, for a
+   memory trip, checks recovery for no more than five seconds.
+7. If recovery fails, enter hard reset. Otherwise continue to selected-session
+   preparation.
 
 ### Hard reset
 
-Critical macOS memory pressure enters this path immediately. Failed graceful recovery escalates into the same path; escalation is not a third behavior.
+Critical macOS pressure restarts the supervised model process before ordinary
+session cleanup. A failed graceful recovery invokes the same process restart.
 
-1. Refuse new turns and new call-scoped allocations.
-2. Restart or reload Qwen through LM Studio to reclaim memory. Under critical pressure this happens before ordinary session cleanup so enough memory exists to finish the procedure.
-3. Complete session cleanup and persist all completed conversation messages.
-4. Verify that the model and runtime are ready for inference.
-5. Rebuild the model/runtime foundation. The stable prefix remains absent at this point.
-6. Continue to the same post-clearance summarization used by the graceful path.
+1. Refuse new turns and interrupt the active model workload.
+2. Restart the entire CAAL-owned model server so the request queue, generation
+   thread, prompt caches, model references, and MLX allocator are reset.
+3. Verify the local API. Model loading completes before greeting when the
+   replacement job performs its first bounded preparation inference.
+4. Continue to the same selected-session preparation. Expected recovery for the
+   current local model is 10-20 seconds.
 
-## Persistent History and Summary Maintenance
+### Guard signals
 
-Each conversation persists this structure:
+| Signal | Behavior |
+| --- | --- |
+| MLX active allocation reaches 6 GiB by default | Graceful trip |
+| macOS urgent memory pressure | Observe and log only; no trip |
+| macOS critical memory pressure | Hard reset first |
+| Model footprint reaches its cap while MLX metrics are unavailable | Graceful fallback trip |
 
-```text
-full transcript
-last valid summary
-summary_through_rowid
-complete messages after summary_through_rowid
-```
+MLX allocation comes from the owned server's `/v1/memory`. The process
+footprint remains a fallback. Model-server prompt/decode concurrency defaults
+to four, while each voice job serializes its own inference to one.
 
-Messages must be written as turns complete, rather than waiting for session teardown. An incomplete assistant response may be stored as interrupted for display, but it must be excluded from future context and summarization.
+## Persistent Summary Maintenance
 
-During an active call, check the unsummarized character count after each completed assistant turn. At 4,000 characters by default, run one bounded rolling-summary request. This threshold prevents per-turn summarization while keeping the pending delta below the normal 6,000-character summary input budget. Rolling maintenance shares the voice job's single inference lock. If a final user transcript arrives, cancel maintenance immediately and let the live turn proceed; retry only after a later assistant turn. A failed attempt is otherwise rate-limited for 120 seconds. Rolling updates affect only durable state for the next call and never rewrite the active call's session prefix.
+Messages are written as turns complete. Interrupted assistant output may remain
+for display but is excluded from summarization and future model context.
 
-At session breakdown, summarization also occurs after graceful recovery succeeds or hard-reset readiness is verified. This post-clearance pass checkpoints the remaining delta regardless of whether the rolling threshold was reached. It is not part of teardown, and it does not use an additional RAM threshold. Successful clearance/readiness is its only memory gate.
+During an active call, check pending characters after completed assistant turns.
+At 4,000 characters by default, run one rolling checkpoint in the same inference
+slot. A final user transcript cancels it so the live turn wins; failure retries
+no more frequently than the configured cooldown.
 
-The bounded summary request consumes:
+Before a selected conversation's next greeting, checkpoint any remaining
+eligible delta regardless of the rolling threshold. One request consumes at
+most 6,000 characters:
 
 ```text
 [previous summary]
 [complete messages after summary_through_rowid]
 ```
 
-It must not repeatedly summarize the entire transcript. Limit its output tokens and execution time. On success, atomically replace the summary and advance the SQLite `summary_through_rowid` checkpoint. On failure or timeout, keep the previous summary and checkpoint, do not reset again, and do not block reconnection. The next call falls back to the previous summary plus a bounded recent tail.
-
-After the summary request succeeds or terminates, explicitly run the stable-prefix warm-up with the exact production system instructions and tool definitions. This is required after both transition paths: it recreates the cache after a hard reset and validates or refreshes it after a graceful transition. Run it after summarization so the summary request cannot become the last inference workload and displace the prefix intended for the next call.
-
-Reconnecting to the same session retains its conversation ID. Switching loads only the target conversation's durable state. Starting a new conversation creates empty history with no summary.
+On success, atomically replace the summary and advance the row checkpoint. On
+failure or timeout, keep the prior checkpoint and load an unsummarized fallback
+tail up to the same 6,000-character budget. Never reset again because summary
+failed. A conversation switched away from need not be summarized until it is
+selected again; its full transcript remains durable.
 
 ## Prompt Construction
 
-The prompt has three nested prefix layers:
-
 | Prefix | Prepared in | Contents |
 | --- | --- | --- |
-| **Stable prefix** | Stage 1 and Stage 6 | System instructions and tool definitions. Stage 6 explicitly rehydrates it after post-clearance summarization. |
-| **Session prefix** | Stages 2 and 4 | Stable prefix, session date/time, current user memory, latest valid conversation summary, and bounded recent history. |
-| **Turn prefix** | Stages 3 and 5 | Session prefix, completed turns from the current call, and the current user message. |
+| **Stable prefix** | Stage 1 or explicit invalidation | Exact stable system instructions and canonical tool definitions. |
+| **Session prefix** | Stages 2 and 4 | Stable prefix plus finalized date/time, current user memory, selected summary, and bounded tail. Construct before greeting; prefill during greeting. |
+| **Turn prefix** | Stages 3 and 5 | Frozen session prefix plus current-call turns and current user message. |
 
-User memory belongs to the session prefix because it can change between calls and may be updated by the previous session.
-
-Construct every prompt in this order:
+The exact token order is:
 
 ```text
-[system instructions]
-[tool definitions]
+[stable system instructions]
+[exact stable tool definitions]
 [session date/time]
 [current user memory]
-[conversation summary]
-[recent conversation tail]
+[finalized conversation summary]
+[recent durable tail]
 [current-call turns]
 [current user message]
 ```
 
-Memory updates made during a call normally take effect in the next call's session prefix. If an update must take effect immediately, rebuild the current session prefix.
-
-After a graceful transition, Stage 6 retains the model/runtime foundation and explicitly validates or refreshes the stable prefix. After a hard reset, it first restores model/runtime readiness and then recreates the stable prefix. In both cases, Stages 2 and 4 extend that stable prefix with user memory and durable conversation state to build a new session prefix.
+User-memory changes normally take effect in the next call. Greeting interruption
+does not cancel session prefill; the first real user turn awaits the same task.
+Cache state is reported outside model-visible history as `loading`, then `ready`
+or `failed`.

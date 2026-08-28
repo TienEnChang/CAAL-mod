@@ -10,7 +10,7 @@ from caal.memory_guard import (
     MemoryGuardConfig,
     MemoryReading,
     PressureLevel,
-    _process_tree,
+    _model_server_pids,
     _sysctl_pressure_level,
     evaluate,
     guard_loop,
@@ -34,7 +34,7 @@ def test_healthy_reading_does_not_trip():
 def test_footprint_at_the_cap_requests_graceful_recovery():
     trip = evaluate(MemoryReading(8 * GIB, PressureLevel.NORMAL), CONFIG)
     assert trip is not None
-    assert "LM Studio is holding" in trip.reason
+    assert "The model is holding" in trip.reason
     assert trip.restart_first is False
 
 
@@ -43,8 +43,47 @@ def test_footprint_below_the_cap_does_not_trip():
 
 
 def test_urgent_pressure_alone_does_not_trip():
-    """Urgent is a system-wide state; only the model's own growth is tier one."""
     assert evaluate(MemoryReading(4 * GIB, PressureLevel.URGENT), CONFIG) is None
+
+
+def test_mlx_allocation_cap_precedes_footprint_fallback():
+    """A readable MLX figure decides the trip; the footprint is not consulted."""
+    trip = evaluate(
+        MemoryReading(
+            model_footprint_bytes=4 * GIB,
+            pressure=PressureLevel.NORMAL,
+            model_active_bytes=8 * GIB,
+        ),
+        CONFIG,
+    )
+    assert trip is not None
+    assert "MLX" in trip.reason
+
+
+def test_footprint_is_ignored_while_mlx_is_readable():
+    """An over-limit footprint must not trip when MLX reports room to spare.
+
+    The footprint includes the Python runtime and Metal overhead, so it reads
+    higher than MLX's own accounting for the same state. Consulting it while
+    the better signal is available would end calls early.
+    """
+    assert (
+        evaluate(
+            MemoryReading(
+                model_footprint_bytes=9 * GIB,
+                pressure=PressureLevel.NORMAL,
+                model_active_bytes=2 * GIB,
+            ),
+            CONFIG,
+        )
+        is None
+    )
+
+
+def test_both_signals_trip_at_the_same_ceiling():
+    """Which signal is available must not change where the call ends."""
+    config = MemoryGuardConfig.from_env()
+    assert config.max_active_bytes == config.max_model_bytes == 8 * GIB
 
 
 def test_critical_pressure_requests_restart_first():
@@ -99,23 +138,22 @@ def test_normal_pressure_survives_the_reading(monkeypatch):
     assert reading.measured is True
 
 
-def test_process_tree_matches_the_executable_not_the_command_line(monkeypatch):
+def test_model_server_pids_matches_the_script_not_any_interpreter(monkeypatch):
     listing = "\n".join(
         [
-            "  1     0 /sbin/launchd",
-            " 25432     1 llmster",
-            " 25438 25432 /Users/me/.lmstudio/.internal/utils/node",
-            " 46380 25438 /Users/me/.lmstudio/.internal/utils/node",
-            " 59525     1 /bin/zsh",  # a shell whose arguments mention llmster
-            " 60001     1 llmsterctl",  # a different executable sharing a prefix
+            "    1 /sbin/launchd",
+            " 25432 /path/.native/mlx-model-venv/bin/python "
+            "/app/scripts/mlx_model_server.py --model foo/bar --port 8100",
+            " 25438 /path/.venv/bin/python /app/voice_agent.py start",
+            " 46380 /path/.native/mlx-speech-venv/bin/python /app/local_speech_server.py",
+            " 59525 /bin/zsh -c tail -f mlx_model_server.py.log",  # merely mentions it
         ]
     )
-    monkeypatch.setattr("caal.memory_guard.sys.platform", "darwin")
     monkeypatch.setattr(
         "caal.memory_guard.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=listing),
     )
-    assert sorted(_process_tree("llmster")) == [25432, 25438, 46380]
+    assert sorted(_model_server_pids()) == [25432]
 
 
 @pytest.mark.asyncio

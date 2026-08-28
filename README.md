@@ -82,7 +82,7 @@ For faster development, keep the Metal-backed models loaded in one terminal and
 restart the app services independently in another:
 
 ```bash
-# Terminal 1: LM Studio, Whisper, and Kokoro
+# Terminal 1: the model, Whisper, and Kokoro
 ./start-native.sh --models
 
 # Terminal 2: LiveKit, agent, and frontend
@@ -97,7 +97,7 @@ and configurable port environment variables.
 
 Native launchd installs continuously record lightweight system memory samples
 every minute and attributed macOS `footprint` samples every five minutes. The
-diagnostics separate LM Studio, Whisper/Kokoro, agent workers, n8n, LiveKit,
+diagnostics separate the model server, Whisper/Kokoro, agent workers, n8n, LiveKit,
 and the frontend; they also track Metal/IOAccelerator allocations, compressed or
 swapped pages, and system swap. Inspect the last day:
 
@@ -111,58 +111,69 @@ one rotated generation), so no personal transcript or prompt content is logged.
 
 During an active call the native agent watches two trip signals:
 
-- the LM Studio inference tree's physical footprint reaching 8 GiB
+- MLX active allocation reaching 6 GiB (with an 8 GiB process-footprint
+  fallback when MLX metrics are unavailable)
 - macOS entering its integrated critical memory-pressure state
 
-The footprint is the early, LM-Studio-local boundary. LM Studio publishes no
-allocation counter of its own - its REST API reports a loaded instance's
-context configuration and its catalog reports the model's static file size,
-neither of which tracks live memory - so CAAL reads macOS' own `footprint`
-accounting for the `llmster` daemon and its inference children. It therefore
-works for any model or quantization LM Studio can serve, but includes other
-models simultaneously loaded in the same LM Studio runtime. The system signal
+The primary model-local boundary comes from MLX allocation counters published
+at `GET /v1/memory`. macOS `footprint` accounting for CAAL's model service is a
+fallback when that endpoint is unavailable. Both work for any model or
+quantization mlx-lm can serve. The system signal
 comes from `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` and
 `kern.memorystatus_vm_pressure_level`, which integrate the VM system's
 reclaimable memory, compression and swapping decisions instead of making CAAL
-derive a second pressure policy from free RAM and swap.
+derive a second pressure policy from free RAM and swap. Urgent pressure is
+observed for diagnostics only; it does not end a session.
 
-At the footprint boundary the session is marked terminated, further turns are
-refused, and ordinary request teardown releases the transient allocations. If
-the footprint does not fall below 6 GiB within 20 seconds, CAAL reloads its
-named model instance through LM Studio's unload/load controls. At critical
-macOS pressure the model
-is reloaded first so the room teardown and reconnect have enough memory to
-complete. After either path clears memory, CAAL checkpoints the completed
-conversation into its durable summary and explicitly warms the stable system
-prompt and exact tool definitions. The desktop then reconnects a fresh agent
-job to the same conversation, which loads that summary plus only a bounded
-unsummarized tail. Summary or cache-warm failure never deletes history or
-triggers another reset. `CAAL_MODEL_MEMORY_TRIP_GB` and
-`CAAL_MODEL_MEMORY_RECOVERY_GB` move the two guard thresholds. The complete
-lifecycle and cache boundaries are specified in
+At every call end, bounded outgoing cleanup immediately clears call-scoped
+model and speech caches while keeping their parameters warm. The replacement
+job repeats that idempotent clear if one starts, covering a room deletion that
+interrupted outgoing cleanup. At the allocation boundary the session is marked
+terminated and further turns are refused; replacement recovery gives normal
+teardown up to five seconds to reduce allocation below 4.5 GiB. If it fails, CAAL
+restarts the entire supervised model process. Critical macOS pressure takes
+that hard-reset path first so room teardown and reconnect have enough memory to
+complete. Before every selected call's greeting—including the first call after
+service startup—the job finishes any eligible summary delta, reconstructs the
+session, and binds the persisted stable tool generation. Only exact frozen
+session-prefix prefill overlaps the greeting. Summary or cache-warm failure
+never deletes history or triggers another reset. The complete lifecycle and
+cache boundaries are specified in
 [docs/PROMPT-CACHE-LIFECYCLE.md](docs/PROMPT-CACHE-LIFECYCLE.md).
 
 Long calls also checkpoint a rolling summary after 4,000 new transcript
 characters, rather than after every turn. This maintenance uses the same
 serialized inference slot as voice responses and is cancelled whenever a new
-final user transcript arrives; post-clearance summarization catches up later.
+final user transcript arrives; pre-call summarization catches up before the
+next greeting, including the first greeting after a service restart.
 
-The headless LM Studio runtime is supervised as CAAL's `model` service. Select
-any downloaded LM Studio model without code changes:
+CAAL serves its own model through mlx-lm, supervised as the `model` service.
+Owning the process is what makes it possible to release a finished call's KV
+cache without unloading the weights, and to hold the model inside a wired-memory
+budget rather than letting it wire 11.84 GiB of a 16 GiB machine.
+
+`GET /v1/models` lists every MLX model in the Hugging Face cache, so adding an
+option is downloading one:
 
 ```bash
-lms ls
-CAAL_LMSTUDIO_MODEL=qwen3-4b-instruct-2507 ./start-native.sh
+curl -X POST http://127.0.0.1:8100/v1/models/download \
+  -H 'Content-Type: application/json' \
+  -d '{"repo_id":"mlx-community/Qwen3-4B-Instruct-2507-4bit"}'
 ```
 
-`CAAL_LMSTUDIO_CONTEXT_LENGTH` defaults to 32768 and
-`CAAL_LMSTUDIO_PARALLEL` defaults to 4 concurrent predictions. The server
-remains local-only on `CAAL_LMSTUDIO_PORT` (8100 by default); LM Link can
-separately expose the same library to Bionic on another device. CAAL always
-loads its selection under the stable `caal-model` API identifier and only
-unloads that instance during recovery, so models loaded by Bionic are not
-evicted. Override the identifier with `CAAL_LMSTUDIO_INSTANCE_ID` only if
-another client already uses that name.
+Progress is at `GET /v1/models/download`. Switching models is choosing one in
+the web UI: the choice is saved to settings and the next call names it, which
+makes the server load it on demand and drop the previous one. No restart is
+involved. `CAAL_MODEL_ID` sets the default for a fresh install,
+`CAAL_MODEL_PORT` the port (8100), and `CAAL_MODEL_WIRED_LIMIT_GB` /
+`CAAL_MODEL_MEMORY_LIMIT_GB` the memory budget (6 and 10 GiB). The
+allocation ceiling stays above the guard's 8 GiB trip so the guard, not
+MLX's allocator, is what ends a call.
+
+LM Studio is no longer part of the serving path. It can stay installed as a way
+to browse and download models - its library is a plain directory of Hugging Face
+repos - but CAAL no longer talks to it, and its memory no longer counts against
+CAAL's guard.
 
 The same teardown asks the local MLX speech bridge to clear reusable allocator
 buffers after STT and TTS finish. Whisper and Kokoro remain loaded, so the next

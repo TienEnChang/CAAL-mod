@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 SERVICE_MARKERS = {
-    "model": ("lmstudio_model_server.py",),
+    "model": ("mlx_model_server.py",),
     "speech": ("local_speech_server.py",),
     "n8n": ("n8n/bin/n8n",),
     "livekit": ("livekit-server",),
@@ -30,9 +30,6 @@ SERVICE_MARKERS = {
 # whole system-metrics block and leaving every background sample empty.
 MEMORY_PRESSURE_BIN = "/usr/bin/memory_pressure"
 SYSCTL_BIN = "/usr/sbin/sysctl"
-# The LM Studio daemon. Its inference workers are ordinary node executables, so
-# they are reached by walking the process tree rather than by matching a name.
-LMSTUDIO_DAEMON_COMM = "llmster"
 GIB = 1024**3
 DEFAULT_SAMPLE_SECONDS = 60
 DEFAULT_DEEP_SECONDS = 300
@@ -176,50 +173,7 @@ def _service_processes(
             "rss_bytes": sum(processes[pid]["rss_bytes"] for pid in service_pids),
         }
 
-    # llmster is intentionally detached from CAAL's small supervisor wrapper.
-    # Attribute the daemon and its inference children to the generic model lane.
-    lmstudio_roots = _executable_pids(LMSTUDIO_DAEMON_COMM)
-    if lmstudio_roots and "model" in services:
-        pending = list(lmstudio_roots)
-        model_pids = set(services["model"]["pids"])
-        while pending:
-            pid = pending.pop()
-            if pid in model_pids:
-                continue
-            model_pids.add(pid)
-            pid_services[pid] = "model"
-            pending.extend(children.get(pid, []))
-        services["model"] = {
-            "pids": sorted(model_pids),
-            "rss_bytes": sum(processes[pid]["rss_bytes"] for pid in model_pids),
-        }
     return pid_services, services
-
-
-def _executable_pids(comm: str) -> list[int]:
-    """Return the pids whose executable is named ``comm``.
-
-    Matching the executable rather than the command line matters: an unrelated
-    process whose arguments merely mention LM Studio - a shell pipeline, an
-    editor, this monitor's own diagnostics - must not be attributed to the
-    model lane, and llmster's own command line carries no bundle path to match.
-    """
-    try:
-        output = _run(["ps", "-axo", "pid=,comm="], timeout=10)
-    except (MonitorError, subprocess.TimeoutExpired, OSError):
-        return []
-    pids = []
-    for raw_line in output.splitlines():
-        parts = raw_line.strip().split(maxsplit=1)
-        if len(parts) < 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        if os.path.basename(parts[1]) == comm:
-            pids.append(pid)
-    return pids
 
 
 def _system_metrics() -> dict[str, int | float]:

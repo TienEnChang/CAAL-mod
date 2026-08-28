@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./start-native.sh                       Start and supervise the full stack
-#   ./start-native.sh --models              Run LM Studio + speech services only
+#   ./start-native.sh --models              Run the model + speech services only
 #   ./start-native.sh --app                 Run app services; reuse healthy models
 #   ./start-native.sh --restart <service>   Restart one service in place
 #   ./start-native.sh --install-n8n         Install the bundled n8n runtime
@@ -62,12 +62,39 @@ N8N_BIN="$N8N_PREFIX/node_modules/n8n/bin/n8n"
 N8N_DATA_DIR="$DATA_DIR/n8n"
 N8N_KEY_FILE="$CONFIG_DIR/n8n-encryption-key"
 
-LMS_BIN="${CAAL_LMS_BIN:-$(command -v lms || echo "$HOME/.lmstudio/bin/lms")}"
-LMSTUDIO_MODEL="${CAAL_LMSTUDIO_MODEL:-qwen3-4b-instruct-2507}"
-LMSTUDIO_INSTANCE_ID="${CAAL_LMSTUDIO_INSTANCE_ID:-caal-model}"
-LMSTUDIO_PORT="${CAAL_LMSTUDIO_PORT:-8100}"
-LMSTUDIO_CONTEXT_LENGTH="${CAAL_LMSTUDIO_CONTEXT_LENGTH:-32768}"
-LMSTUDIO_PARALLEL="${CAAL_LMSTUDIO_PARALLEL:-4}"
+# CAAL serves its own model through mlx-lm rather than LM Studio, so that a
+# finished call's KV cache can be released without unloading the weights and so
+# the wired-memory budget is ours to set. LM Studio may still be installed for
+# browsing and downloading models; it is simply not in the serving path.
+MLX_MODEL_VENV="$RUNTIME_DIR/mlx-model-venv"
+MODEL_PYTHON="${CAAL_MLX_MODEL_PYTHON:-$MLX_MODEL_VENV/bin/python}"
+# Any repo id shown by GET /v1/models, which lists the Hugging Face cache.
+# The model saved in settings is the source of truth - it is what the agent
+# names on every request, and what the web UI writes when someone switches
+# models. The server is started on that same model so its built-in default can
+# never be a second, competing identity: when the two disagreed, requests that
+# named a model got one and requests that did not got the other, and the server
+# reloaded back and forth between them on almost every call.
+# CAAL_MODEL_ID applies only before anyone has chosen a model.
+settings_model() {
+  [[ -f "$CONFIG_DIR/settings.json" ]] || return 1
+  /usr/bin/python3 -c '
+import json, sys
+try:
+    value = json.load(open(sys.argv[1])).get("openai_model") or ""
+except (OSError, ValueError):
+    sys.exit(1)
+# "caal-model" was the LM Studio instance alias and is not a resolvable repo id.
+sys.exit(1) if not value or value == "caal-model" else print(value)
+' "$CONFIG_DIR/settings.json" 2>/dev/null
+}
+MODEL_ID="$(settings_model || true)"
+MODEL_ID="${MODEL_ID:-${CAAL_MODEL_ID:-mlx-community/Qwen3-4B-Instruct-2507-4bit}}"
+MODEL_PORT="${CAAL_MODEL_PORT:-8100}"
+# Held below the 11.84 GiB mlx-lm would otherwise wire on a 16 GiB machine.
+MODEL_WIRED_LIMIT_GB="${CAAL_MODEL_WIRED_LIMIT_GB:-6}"
+MODEL_MEMORY_LIMIT_GB="${CAAL_MODEL_MEMORY_LIMIT_GB:-10}"
+MODEL_PARALLEL="${CAAL_MODEL_PARALLEL:-4}"
 SPEECH_PORT="${CAAL_SPEECH_PORT:-8001}"
 LIVEKIT_PORT="${CAAL_LIVEKIT_PORT:-7880}"
 LIVEKIT_RTC_TCP_PORT="${CAAL_LIVEKIT_RTC_TCP_PORT:-7881}"
@@ -111,7 +138,7 @@ CAAL native Apple Silicon launcher
 
 Commands:
   (no arguments)              Start and supervise every service
-  --models                    Start and supervise LM Studio, Whisper, and Kokoro
+  --models                    Start and supervise the model, Whisper, and Kokoro
   --app                       Start LiveKit, agent, and frontend using healthy models
   --restart <service>         Restart model, speech, n8n, livekit, agent, or frontend
   --install-n8n               Install the bundled n8n runtime for workflow tools
@@ -129,12 +156,11 @@ Persistent runtime:
   CAAL_TMUX_SESSION           Base tmux session name ($TMUX_SESSION_BASE)
 
 Port overrides:
-  CAAL_LMSTUDIO_MODEL         Any model key shown by 'lms ls' ($LMSTUDIO_MODEL)
-  CAAL_LMSTUDIO_INSTANCE_ID   CAAL-owned API identifier ($LMSTUDIO_INSTANCE_ID)
-  CAAL_LMSTUDIO_PORT          LM Studio OpenAI-compatible API ($LMSTUDIO_PORT)
-  CAAL_LMSTUDIO_CONTEXT_LENGTH Context window ($LMSTUDIO_CONTEXT_LENGTH)
-  CAAL_LMSTUDIO_PARALLEL      Concurrent LM Studio predictions ($LMSTUDIO_PARALLEL)
-  CAAL_LMS_BIN                LM Studio CLI ($LMS_BIN)
+  CAAL_MODEL_ID               Default HF repo id to serve ($MODEL_ID)
+  CAAL_MODEL_PORT             OpenAI-compatible model API ($MODEL_PORT)
+  CAAL_MODEL_WIRED_LIMIT_GB   Wired-memory cap ($MODEL_WIRED_LIMIT_GB)
+  CAAL_MODEL_MEMORY_LIMIT_GB  Allocation cap ($MODEL_MEMORY_LIMIT_GB)
+  CAAL_MODEL_PARALLEL         Prompt/decode concurrency ($MODEL_PARALLEL)
   CAAL_SPEECH_PORT            Whisper/Kokoro bridge ($SPEECH_PORT)
   CAAL_MLX_SPEECH_PYTHON      Existing Python environment with MLX speech packages
   CAAL_UV_PYTHON              Python version/interpreter used for native environments
@@ -147,7 +173,8 @@ Port overrides:
   CAAL_MEMORY_SAMPLE_SECONDS  Lightweight system sample interval (60)
   CAAL_MEMORY_DEEP_SAMPLE_SECONDS  Per-process footprint interval (300)
   Memory guard:
-  CAAL_MODEL_MEMORY_TRIP_GB        Model footprint ceiling (8)
+  CAAL_MODEL_MEMORY_TRIP_GB        Ceiling when MLX is unreadable (8)
+  CAAL_MODEL_ALLOCATION_TRIP_GB    MLX allocation ceiling (8)
   CAAL_MODEL_MEMORY_RECOVERY_GB    Footprint required after teardown (6)
   CAAL_MEMORY_GUARD                false to disable the guard entirely
   CAAL_MEMORY_CHECK_SECONDS        Seconds between guard samples (2)
@@ -360,7 +387,7 @@ stop_supervisors() {
 
 service_port() {
   case "$1" in
-    model) echo "$LMSTUDIO_PORT" ;;
+    model) echo "$MODEL_PORT" ;;
     speech) echo "$SPEECH_PORT" ;;
     n8n) echo "$N8N_PORT" ;;
     livekit) echo "$LIVEKIT_PORT" ;;
@@ -371,7 +398,7 @@ service_port() {
 
 service_url() {
   case "$1" in
-    model) echo "http://127.0.0.1:$LMSTUDIO_PORT/v1/models" ;;
+    model) echo "http://127.0.0.1:$MODEL_PORT/v1/models" ;;
     speech) echo "http://127.0.0.1:$SPEECH_PORT/health" ;;
     n8n) echo "http://127.0.0.1:$N8N_PORT/healthz" ;;
     livekit) echo "http://127.0.0.1:$LIVEKIT_PORT" ;;
@@ -393,7 +420,7 @@ pid_matches_service() {
   kill -0 "$pid" 2>/dev/null || return 1
   command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   case "$name:$command" in
-    model:*lmstudio_model_server.py*) return 0 ;;
+    model:*mlx_model_server.py*) return 0 ;;
     speech:*local_speech_server.py*) return 0 ;;
     n8n:*n8n/bin/n8n*) return 0 ;;
     livekit:*livekit-server*) return 0 ;;
@@ -490,7 +517,8 @@ validate_service_dependency() {
   local name="$1" executable
   case "$name" in
     model)
-      executable="$LMS_BIN"
+      ensure_mlx_model_environment
+      executable="$MODEL_PYTHON"
       ;;
     speech)
       ensure_mlx_speech_environment
@@ -527,6 +555,21 @@ ensure_mlx_speech_environment() {
   "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_SPEECH_VENV"
   "$UV_BIN" pip install --python "$SPEECH_PYTHON" \
     -r "$PROJECT_DIR/requirements-mlx-speech.txt"
+}
+
+ensure_mlx_model_environment() {
+  if [[ -x "$MODEL_PYTHON" ]] && "$MODEL_PYTHON" -c \
+    'import mlx_lm' >/dev/null 2>&1; then
+    return 0
+  fi
+  [[ -n "$UV_BIN" && -x "$UV_BIN" ]] || {
+    echo "Missing uv; install it or set CAAL_MLX_MODEL_PYTHON" >&2
+    return 1
+  }
+  echo "Creating dedicated MLX model environment..."
+  "$UV_BIN" venv --python "$UV_PYTHON" "$MLX_MODEL_VENV"
+  "$UV_BIN" pip install --python "$MODEL_PYTHON" \
+    -r "$PROJECT_DIR/requirements-mlx-model.txt"
 }
 
 require_n8n_installed() {
@@ -739,12 +782,15 @@ start_named() {
   validate_service_dependency "$name"
   case "$name" in
     model)
-      echo "Starting LM Studio: $LMSTUDIO_MODEL → http://127.0.0.1:$LMSTUDIO_PORT/v1"
-      start_service model "$AGENT_PYTHON" "$PROJECT_DIR/scripts/lmstudio_model_server.py" \
-        --lms "$LMS_BIN" --model "$LMSTUDIO_MODEL" --identifier "$LMSTUDIO_INSTANCE_ID" \
-        --port "$LMSTUDIO_PORT" \
-        --context-length "$LMSTUDIO_CONTEXT_LENGTH" \
-        --parallel "$LMSTUDIO_PARALLEL"
+      echo "Starting MLX model server: $MODEL_ID → http://127.0.0.1:$MODEL_PORT/v1"
+      start_service model env \
+        CAAL_MODEL_WIRED_LIMIT_GB="$MODEL_WIRED_LIMIT_GB" \
+        CAAL_MODEL_MEMORY_LIMIT_GB="$MODEL_MEMORY_LIMIT_GB" \
+        "$MODEL_PYTHON" "$PROJECT_DIR/scripts/mlx_model_server.py" \
+        --model "$MODEL_ID" \
+        --host 127.0.0.1 --port "$MODEL_PORT" \
+        --prompt-concurrency "$MODEL_PARALLEL" \
+        --decode-concurrency "$MODEL_PARALLEL"
       ;;
     speech)
       echo "Starting MLX Whisper + MLX Kokoro → http://127.0.0.1:$SPEECH_PORT"
@@ -866,9 +912,13 @@ cleanup_app() {
   unregister_supervisor app
 }
 
-validate_port CAAL_LMSTUDIO_PORT "$LMSTUDIO_PORT"
-if ! [[ "$LMSTUDIO_PARALLEL" =~ ^[0-9]+$ ]] || (( LMSTUDIO_PARALLEL < 1 )); then
-  echo "Invalid CAAL_LMSTUDIO_PARALLEL: $LMSTUDIO_PARALLEL" >&2
+validate_port CAAL_MODEL_PORT "$MODEL_PORT"
+if ! [[ "$MODEL_WIRED_LIMIT_GB" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Invalid CAAL_MODEL_WIRED_LIMIT_GB: $MODEL_WIRED_LIMIT_GB" >&2
+  exit 1
+fi
+if ! [[ "$MODEL_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid CAAL_MODEL_PARALLEL: $MODEL_PARALLEL" >&2
   exit 1
 fi
 validate_port CAAL_SPEECH_PORT "$SPEECH_PORT"
@@ -892,11 +942,10 @@ export CAAL_MEMORY_DIR="$DATA_DIR"
 export CAAL_PROMPT_DIR="$PROJECT_DIR/prompt"
 export LLM_PROVIDER="openai_compatible"
 export OPENAI_API_KEY="not-needed"
-export OPENAI_BASE_URL="http://127.0.0.1:$LMSTUDIO_PORT/v1"
-export OPENAI_MODEL="$LMSTUDIO_INSTANCE_ID"
-export CAAL_LMS_BIN="$LMS_BIN"
-export CAAL_LMSTUDIO_INSTANCE_ID
-export CAAL_LMSTUDIO_PARALLEL="$LMSTUDIO_PARALLEL"
+export OPENAI_BASE_URL="http://127.0.0.1:$MODEL_PORT/v1"
+# Only the default for a fresh install. A model saved in settings wins, which is
+# what makes switching from the web UI take effect on the next call.
+export OPENAI_MODEL="$MODEL_ID"
 export STT_PROVIDER="speaches"
 export SPEACHES_URL="http://127.0.0.1:$SPEECH_PORT"
 export WHISPER_MODEL="${CAAL_WHISPER_MODEL:-mlx-community/distil-whisper-large-v3}"
@@ -1069,7 +1118,7 @@ start_services "${ALL_SERVICES[@]}"
 
 echo
 echo "CAAL is ready: http://localhost:$FRONTEND_PORT"
-echo "LM Studio: $LMSTUDIO_MODEL (API identifier: $LMSTUDIO_INSTANCE_ID)"
+echo "Model: $MODEL_ID (wired <= ${MODEL_WIRED_LIMIT_GB} GiB)"
 echo "Whisper: $WHISPER_MODEL"
 echo "Kokoro: $TTS_MODEL ($TTS_VOICE)"
 echo "Press Ctrl-C to stop all native services."
