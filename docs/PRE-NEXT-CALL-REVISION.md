@@ -64,6 +64,12 @@ When a user hangs up or switches conversations:
 4. Run only bounded, non-inference shutdown-callback cleanup, including an
    immediate idempotent clear of call-scoped model and speech caches.
 5. Do not summarize and do not warm a model prefix in the shutdown callback.
+   One bounded single-token generation is permitted, and only to release
+   call-scoped KV: mlx-lm holds it in a batch generator that no endpoint can
+   reach, and only another generation reallocates it. Nothing reads the reply
+   and no durable state is touched. Cycling the generation thread would also
+   release it but orphans the retained weights' Metal streams; unloading the
+   model would break the model/runtime foundation rule.
 
 LiveKit disconnects the room before awaiting shutdown callbacks. Consequently,
 the frontend must not poll participant count as a proxy for callback progress.
@@ -186,7 +192,7 @@ Required controls:
 ## Acceptance Criteria
 
 1. The frontend reset route contains no 35-second participant drain.
-2. The outgoing shutdown callback performs no LLM request.
+2. The outgoing shutdown callback performs no semantic LLM request. The single-token cache drain described above is the only exception, and it must remain bounded and reply-agnostic.
 3. An ordinary hangup clears call-scoped model and speech caches even when no
    replacement call starts; pre-call cleanup repeats this only as a fallback.
 4. Summary completion precedes greeting start whenever the selected

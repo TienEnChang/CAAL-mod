@@ -82,6 +82,7 @@ from caal.memory_guard import (  # noqa: E402
 )
 from caal.model_cache import (  # noqa: E402
     clear_local_model_cache,
+    drain_local_model_batch,
     restart_local_model_server,
 )
 from caal.prompt_lifecycle import (  # noqa: E402
@@ -739,6 +740,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             for speech_url in speech_cache_urls
         )
         if model_base_url:
+            # These two are ordered, so they cannot join the concurrent set.
+            # Trimming the prompt cache empties mlx-lm's LRU registry but frees
+            # nothing: this call's KV sits in a BatchGenerator held inside the
+            # generation loop, sized to the largest call served and reachable
+            # from nowhere else. Only another generation reallocates it, so the
+            # drain spends one bounded token to force that, and the clear then
+            # drops the entry the drain itself created.
+            await asyncio.to_thread(
+                drain_local_model_batch, model_base_url, runtime["openai_model"]
+            )
             cleanup_calls.append(
                 asyncio.to_thread(clear_local_model_cache, model_base_url, 5.0)
             )

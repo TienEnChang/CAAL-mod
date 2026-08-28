@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from caal.model_cache import (
     clear_local_model_cache,
+    drain_local_model_batch,
     local_model_root,
     read_local_model_memory,
     restart_local_model_server,
@@ -83,3 +84,29 @@ def test_hard_reset_restarts_the_supervised_process(run, get, tmp_path):
         check=False,
     )
     get.assert_called_once_with("http://127.0.0.1:8100/v1/models", timeout=1)
+
+
+@patch("caal.model_cache.requests.post")
+def test_drain_spends_exactly_one_token(post):
+    """The drain exists to reallocate the batch, not to produce output."""
+    post.return_value = Mock()
+
+    assert drain_local_model_batch("http://127.0.0.1:8100/v1", "org/model") is True
+    body = post.call_args.kwargs["json"]
+    assert body["model"] == "org/model"
+    assert body["max_tokens"] == 1
+    assert body["temperature"] == 0
+
+
+@patch("caal.model_cache.requests.post")
+def test_remote_model_is_not_drained(post):
+    assert drain_local_model_batch("https://api.example.com/v1", "org/model") is False
+    post.assert_not_called()
+
+
+@patch("caal.model_cache.requests.post")
+def test_a_failed_drain_does_not_abort_teardown(post):
+    import requests
+
+    post.side_effect = requests.RequestException("refused")
+    assert drain_local_model_batch("http://127.0.0.1:8100/v1", "org/model") is False

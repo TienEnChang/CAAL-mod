@@ -55,6 +55,46 @@ def clear_local_model_cache(base_url: str, timeout: float = 5.0) -> bool:
     return True
 
 
+def drain_local_model_batch(
+    base_url: str, model: str, timeout: float = 20.0
+) -> bool:
+    """Release the KV mlx-lm's batch generator is still holding for this call.
+
+    Clearing the prompt cache empties mlx-lm's LRU registry but frees nothing:
+    the call's KV lives in a BatchGenerator held as a local inside the
+    generation loop, with no handle reachable from anywhere else in the process.
+    It is sized to the largest call served and stays resident until another
+    generation runs through the batch and reallocates it smaller.
+
+    So one bounded token is the release mechanism. It is not a semantic request:
+    nothing reads the reply, no history or summary is touched, and it is capped
+    at a single token so teardown stays bounded. Cycling the generation thread
+    would also free the KV but orphans the retained weights' Metal streams, and
+    unloading the model would break the rule that the model/runtime foundation
+    survives a graceful transition.
+    """
+    root = local_model_root(base_url)
+    if root is None:
+        return False
+    try:
+        response = requests.post(
+            f"{root}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "."}],
+                "max_tokens": 1,
+                "temperature": 0,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        logger.warning("Could not drain the local model's batch cache: %s", error)
+        return False
+    logger.info("Drained the local model's call KV after call end")
+    return True
+
+
 def unload_local_model(base_url: str, timeout: float = 30.0) -> bool:
     """Drop the weights so the next request reloads them - the hard reset."""
     root = local_model_root(base_url)
