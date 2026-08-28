@@ -5,9 +5,10 @@ version: 0.2
 required_open_webui_version: 0.3.9
 """
 
-from pydantic import BaseModel, Field
 from typing import Optional
+
 import requests
+from pydantic import BaseModel, Field
 
 
 class Filter:

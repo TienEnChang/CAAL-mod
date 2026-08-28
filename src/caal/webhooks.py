@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 
 import httpx
@@ -44,8 +45,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
 from livekit.protocol.models import DataPacket
-from collections.abc import Awaitable, Callable
-
 from livekit.protocol.room import ListRoomsRequest, SendDataRequest
 from pydantic import BaseModel
 
